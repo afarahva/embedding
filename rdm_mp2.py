@@ -8,7 +8,7 @@ from pyscf.ao2mo import _ao2mo
 
 def make_fno(mp, dm=None, thresh=1e-6, pct_occ=None, nvir_act=None, t2=None, eris=None, oN4=False):
     r'''
-    Frozen natural orbitals. If dm is not provided uses fast 
+    Frozen natural orbitals. 
     
     Attributes:
         thresh : float
@@ -67,7 +67,7 @@ def make_fno(mp, dm=None, thresh=1e-6, pct_occ=None, nvir_act=None, t2=None, eri
     no_frozen = numpy.hstack((numpy.arange(nocc_loc[0], nocc_loc[1]),
                               numpy.arange(nocc_loc[3], nocc_loc[5]))).astype(int)
 
-    return no_frozen, no_coeff
+    return no_frozen, no_coeff  
 
 def _make_rdm1_oN4(mp, t2=None, eris=None, ao_repr=False, with_frozen=True, with_occupied=False):
     r'''
@@ -302,7 +302,6 @@ if __name__ == '__main__':
     nvir = nmo - nocc    
     co = mf.mo_coeff[:,0:nocc]
     cv = mf.mo_coeff[:,nocc:]
-    eri1 = ao2mo.general(mol, (co,cv,co,cv), aosym='2ij')
     
     # approximate rdm1
     start = time.time()
