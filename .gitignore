@@ -1,0 +1,10 @@
+
+*.pyc
+*.cube
+.DS_Store
+.DS_Store?
+
+testing/
+__pycache__/
+.ipynb_checkpoints/
+*.egg-info/
