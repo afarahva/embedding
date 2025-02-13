@@ -27,13 +27,12 @@ def FragmentPops(mol, mo_coeff, frag_inds, basis_frag, frag_inds_type="atom",  o
 class rRegionalActiveSpace(rUnitaryActiveSpace):
     
     def __init__(self, mf, frag_inds, mo_occ_type, 
-                 frag_inds_type="atom", basis='minao', orth=None,
+                 frag_inds_type="atom", basis='minao', orth=False,
                  cutoff_type="overlap", cutoff=0.1):
         """
         
         Parameters
         ----------
-        mol : PySCF Molecule object
         mf : PySCF Mean Field object
         frag_inds : Iterable
             Indices of fragment atoms.
@@ -45,6 +44,7 @@ class rRegionalActiveSpace(rUnitaryActiveSpace):
         frag_inds_type : String.
             Specify 'orbital' if supplying a list of orbital indices in 
             frag_inds instead of atom indices
+            
         basis : String.
             Fragment basis set for occupied orbitals. Default: 'minao'
             
@@ -60,21 +60,24 @@ class rRegionalActiveSpace(rUnitaryActiveSpace):
             'pct_occ' assigns active MOs as those with the higest overlap with 
             the fragment until a percentage of the total overlap is reached.
             
-            'Nnrb' assigns active MOs as those with the higest overlap with 
+            'norb' assigns active MOs as those with the higest overlap with 
             the fragment until the cutoff. 
             
-        orth : Method to orthogonalize atomic orbitals. 
-            Options are lowdin, meta-lowdin, nao, or schmidt. Default: None
-        Norb_act : Int
-            Maximum number of active orbitals
+        orth : Bool
+            Whether to orthogonalization fragment orbitals. Default is False.
         """
         super().__init__(mf,mo_occ_type)
         self.cutoff=cutoff
         self.cutoff_type = cutoff_type
+        self.basis=basis
         self.fc_ints = FC_AO_Ints(mf.mol, frag_inds, frag_inds_type=frag_inds_type, basis_frag=basis, orth=orth)
         
     def calc_projection(self):
-        ovlp_ff, ovlp_fc = self.fc_ints.calc_ao_ovlp()
+        if self.basis.lower()=='iao':
+            ovlp_ff, ovlp_fc = self.fc_ints.calc_ao_ovlp(moC_occ=self.mf.mo_coeff[:,self.mf.mo_occ>0])
+        else:
+            ovlp_ff, ovlp_fc = self.fc_ints.calc_ao_ovlp()
+
         ovlp_f_mo = ovlp_fc @ self.moC
         
         #
@@ -150,21 +153,21 @@ if __name__ == '__main__':
     H         -1.85763       -2.04579       -0.23330
     """
     
-    mol = pyscf.M(atom=coords,basis='ccpvdz',verbose=3)
+    mol = pyscf.M(atom=coords,basis='ccpvdz',verbose=4)
     mf = mol.RHF().run()
     
     # calculate localized orbital energies/coefficients
     frag_inds=[0,1]
-    basis_occ='minao'
+    basis_occ='iao'
     basis_vir=mol.basis
-    cutoff_occ=0.0
-    cutoff_vir=0.1
-    re = rRegionalEmbedding(mf, frag_inds, 'atom', basis_occ, basis_vir, cutoff_occ, cutoff_vir)
+    cutoff_occ=0.1
+    cutoff_vir=0.0
+    re = rRegionalEmbedding(mf, frag_inds, 'atom', basis_occ, basis_vir, cutoff_occ, cutoff_vir, orth=False)
     moE_new, moC_new, indx_frz = re.kernel()
-    print(len(indx_frz))
-
+    
     # embedded
     mycc = pyscf.cc.CCSD(mf)
+    mycc = mycc.density_fit(auxbasis='ccpvtzri')
     mycc.mo_coeff = moC_new
     mycc.frozen = indx_frz
     mycc.run()

@@ -112,7 +112,7 @@ class FC_AO_Ints:
     composite system and localized orbitals of a fragment. 
     """
     
-    def __init__(self, mol_comp, frag_inds, frag_inds_type='atom', basis_frag=None, orth=None):
+    def __init__(self, mol_comp, frag_inds, frag_inds_type='atom', basis_frag=None, orth=False):
         """
         Parameters
         ----------
@@ -127,9 +127,8 @@ class FC_AO_Ints:
         basis_frag : String
             Basis set for fragment, Default is to use same as in mol
             
-        orth : String
-            Method for orthogonalization orbitals. Default is None.
-            Options are 'lowdin' or 'meta-lowdin'
+        orth : Bool
+            Whether to orthogonalization fragment orbitals. Default is False.
         """
         
         self.mol = mol_comp
@@ -141,7 +140,10 @@ class FC_AO_Ints:
             self.basis = basis_frag
         
         # determine indices of orbitals belonging to fragment
-        self.mol2 = gto.M(atom=self.mol._atom, basis=self.basis, spin=0, unit='Bohr')
+        if self.basis.lower()!='iao':
+            self.mol2 = gto.M(atom=self.mol._atom, basis=self.basis, spin=0, unit='Bohr')
+        else:
+            self.mol2 = gto.M(atom=self.mol._atom, basis='minao', spin=0, unit='Bohr')
         
         if frag_inds_type.lower() == "atom":
             self.frag_atm_inds = frag_inds
@@ -156,7 +158,7 @@ class FC_AO_Ints:
             raise ValueError("frag_inds_type must be either 'atom' or 'orbital'")
             
         # orthogonalization method for fragment AOs
-        self.orth_method = orth
+        self.orth = orth
         
         # < frag AO | frag AO > overlap
         self.s_ff = None
@@ -164,7 +166,7 @@ class FC_AO_Ints:
         # < frag AO | composite AO > overlap
         self.s_fc = None
                 
-    def calc_ao_ovlp(self):
+    def calc_ao_ovlp(self, moC_occ=None):
         """
         Calculate overlap matrices between fragment AOs and composite AOs
                 
@@ -174,18 +176,24 @@ class FC_AO_Ints:
         s_fc : fragment-composite overlap integral
         """
         
-        # < frag AO | frag AO > overlap
-        s_ff = self.mol2.intor_symmetric('int1e_ovlp')[np.ix_(self.frag_ao_inds,self.frag_ao_inds)]
-        
-        # < frag AO | composite AO > overlap
-        s_fc = gto.mole.intor_cross('int1e_ovlp', self.mol2, self.mol)[self.frag_ao_inds]
+        # special case, intrinsic atomic orbitals
+        if self.basis.lower()=='iao':
+            c_iao = lo.iao.iao(self.mol, moC_occ)
+            s_all = self.mol.intor_symmetric('int1e_ovlp')
+            s_ff = (c_iao.T @ s_all @ c_iao)[np.ix_(self.frag_ao_inds,self.frag_ao_inds)]
+            s_fc = (c_iao.T @ s_all)[self.frag_ao_inds]
+           
+        else:
+            # < frag AO | frag AO > overlap
+            s_ff = self.mol2.intor_symmetric('int1e_ovlp')[np.ix_(self.frag_ao_inds,self.frag_ao_inds)]
             
-        # orthogonalize frag AOs and return orthogonalized overlap integrals
-        if self.orth_method is not None:
-            s_ff, s_fc = self.orth(self.orth_method, s_ff, s_fc)
-            
-        self.s_ff, self.s_fc = s_ff, s_fc
-        
+            # < frag AO | composite AO > overlap
+            s_fc = gto.mole.intor_cross('int1e_ovlp', self.mol2, self.mol)[self.frag_ao_inds]
+                
+            # orthogonalize frag AOs and return orthogonalized overlap integrals
+            if self.orth:
+                s_ff, s_fc = self.lowdin(s_ff, s_fc)
+
         return s_ff, s_fc
     
     def calc_mo_ovlp(self, c_mo):
@@ -245,22 +253,13 @@ class FC_AO_Ints:
         pop = np,sum( np.abs(C_f_mo)**2, axis=1)
         return pop
     
-    def orth(self, method, s_ff, s_fc):
+    def lowdin(self, s_ff, s_fc):
         """
         Orthogonalize fragment orbitals.
         """
-          
-        if method.lower == 'lowdin':            
-            s_fo = lo.lowdin(s_ff)
-            s_fc = s_fo.T @ s_ff @ s_fc
-            s_ff = s_fo.T @ s_ff @ s_fo
-            
-        elif method.lower== 'meta-lowdin':
-            pre_orth_ao = np.eye(self.mol.nao)
-            weight = np.ones(pre_orth_ao.shape[0])
-            s_fo = lo.nao._nao_sub(self.mol, weight, pre_orth_ao, s_ff)
-            s_fc = s_fo.T @ s_ff @ s_fc
-            s_ff = s_fo.T @ s_ff @ s_fo
+        C_fo = lo.lowdin(s_ff)
+        s_fc = C_fo.T @ s_fc
+        s_ff = C_fo.T @ s_ff @ C_fo
 
         return s_ff, s_fc    
 
@@ -385,8 +384,7 @@ class rUnitaryActiveSpace:
         # calculate projected MOs
         if self.P_act is not None:
             moE_act,moC_act = self.pseudocanonical(self.moE,self.moC,self.P_act)
-            moE_frz,moC_frz = self.pseudocanonical(self.moE,self.moC,self.P_frz)
-            
+            moE_frz,moC_frz = self.pseudocanonical(self.moE,self.moC,self.P_frz)            
             moC = np.hstack([moC_act,moC_frz])
             moE = np.hstack([moE_act,moE_frz])
             mask_act = np.arange(len(moE)) < self.Norb_act

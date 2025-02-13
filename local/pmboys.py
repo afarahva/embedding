@@ -16,12 +16,45 @@ from pyscf import lo
 class PMBoysActiveSpace(rUnitaryActiveSpace):
     
     def __init__(self, mf, frag_inds, mo_occ_type, localizer, 
-                 frag_inds_type='atom', cutoff=0.1, pop_method='meta-lowdin'):
-        
+                 frag_inds_type='atom', cutoff_type="overlap", cutoff=0.1, 
+                 pop_method='meta-lowdin'):
+        """
+        Parameters
+        ----------
+        mf : PySCF Mean Field object
+        frag_inds : Iterable
+            Indices of fragment atoms.
+        mo_occ_type : String.
+            One of either 'occupied' or 'virtual'. 
+            
+        OPTIONAL: 
+        ----------
+        frag_inds_type : String.
+            Specify 'orbital' if supplying a list of orbital indices in 
+            frag_inds instead of atom indices
+        basis : String.
+            Fragment basis set for occupied orbitals. Default: 'minao'
+            
+        cutoff : Float or Int
+            Cutoff for active orbitals. Default: 0.1
+            
+        cutoff_type : String
+            Type of cutoff value. One of 'overlap', 'pct_occ', or 'norb'.
+            
+            'overlap' (default) assigns active MOs as those with a higher
+            overlap value than the cutoff specified. 
+            
+            'norb' assigns active MOs as those with the higest overlap with 
+            the fragment until the cutoff. 
+            
+        pop_method : String
+            Pop method for selecting MOs. Default is meta-lowdin.
+        """
         super().__init__(mf,mo_occ_type)
 
         self.localizer = localizer
         self.cutoff = cutoff
+        self.cutoff_type=cutoff_type
         self.pop_method = pop_method
         
         if frag_inds_type.lower() == "atom":
@@ -65,8 +98,17 @@ class PMBoysActiveSpace(rUnitaryActiveSpace):
         # calculate localized MOs
         self.lmo_coeff = self.localizer.kernel()
         self.frag_pop = self.population(self.lmo_coeff, method=self.pop_method)
-        mask_act = self.frag_pop > self.cutoff
-        mask_frz = ~mask_act
+        
+        if self.cutoff_type.lower() in ['overlap','pop','population']:
+            mask_act = self.frag_pop > self.cutoff
+            mask_frz = ~mask_act
+        elif self.cutoff_type.lower() in ['norb','norb_act']:
+            indx_sort = np.flip(np.argsort( self.frag_pop ))
+            mask_act = np.zeros(len( self.frag_pop ), dtype=bool)
+            mask_act[indx_sort[0:self.cutoff]] = True
+            mask_frz = ~mask_act
+        else:
+            raise ValueError("Incorrect cutoff type. Must be one of 'overlap', or 'norb'" )
         
         # Unitary transformation matrix
         self.u = self.unitary_mo_to_lmo(self.moC, self.lmo_coeff)
@@ -133,12 +175,12 @@ if __name__ == '__main__':
     loc1 = lo.PipekMezey(mol, mf.mo_coeff[:,mf.mo_occ > 0])
     loc1.max_stepsize=0.005
     loc1.init_guess='cholesky'
-    occ_calc = PMBoysActiveSpace(mf, frag_inds, 'occ', loc1, cutoff=0.01)
+    occ_calc = PMBoysActiveSpace(mf, frag_inds, 'occ', loc1, cutoff_type='norb', cutoff=10)
     
     loc2 = lo.PipekMezey(mol, mf.mo_coeff[:,mf.mo_occ == 0])
     loc2.max_stepsize=0.005
     loc2.init_guess='cholesky'
-    vir_calc = PMBoysActiveSpace(mf, frag_inds, 'vir', loc2, cutoff=0.01)
+    vir_calc = PMBoysActiveSpace(mf, frag_inds, 'vir', loc2, cutoff_type='norb', cutoff=20)
     
     embed = rWVFEmbedding(occ_calc,vir_calc)
     moE_new, moC_new, indx_frz = embed.calc_mo()
@@ -150,7 +192,7 @@ if __name__ == '__main__':
     mycc.frozen = indx_frz
     mycc.run()
     
-    cubegen.orbital(mol,"./pm_homo.cube", moC_new[:,embed.mask_occ_act][:,-1])
-    cubegen.orbital(mol,"./pm_lumo.cube", moC_new[:,embed.mask_vir_act][:,0])
+    # cubegen.orbital(mol,"./pm_homo.cube", moC_new[:,embed.mask_occ_act][:,-1])
+    # cubegen.orbital(mol,"./pm_lumo.cube", moC_new[:,embed.mask_vir_act][:,0])
 
     
