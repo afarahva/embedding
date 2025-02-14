@@ -76,6 +76,11 @@ class rPAO(rUnitaryActiveSpace):
         if self.mo_space.lower() in ['o','occ','occupied']:
             C = self.mf.mo_coeff[:,self.mf.mo_occ < 1]
             P = C @ C.T
+        elif self.mo_space.lower() in ['v','vir','virtual']:
+            C = self.mf.mo_coeff[:,self.mf.mo_occ >= 1]
+            P = C @ C.T
+        else:
+            raise ValueError ("mo_occ_type  must be one of 'occ' or 'vir'")
             
         C_pao = (np.eye(P.shape[0]) - P @ S) # unnormalized PAOs
         
