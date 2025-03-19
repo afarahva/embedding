@@ -24,11 +24,13 @@ def FragmentPops(mol, mo_coeff, frag_inds, basis_frag, frag_inds_type="atom",  o
     return pop
 
 # regional embedding active space projector (either occupied or virtual)
+# this version works for any spin-restricted system, but only single k-point
+# periodic calculations are supported. 
 class rRegionalActiveSpace(rUnitaryActiveSpace):
     
     def __init__(self, mf, frag_inds, mo_occ_type, 
                  frag_inds_type="atom", basis='minao', orth=False,
-                 cutoff_type="overlap", cutoff=0.1):
+                 cutoff_type="overlap", cutoff=0.1, frozen_core=False):
         """
         
         Parameters
@@ -73,8 +75,8 @@ class rRegionalActiveSpace(rUnitaryActiveSpace):
         self.fc_ints = FC_AO_Ints(mf.mol, frag_inds, frag_inds_type=frag_inds_type, basis_frag=basis, orth=orth)
         
     def calc_projection(self):
-        if self.basis.lower()=='iao':
-            ovlp_ff, ovlp_fc = self.fc_ints.calc_ao_ovlp(moC_occ=self.mf.mo_coeff[:,self.mf.mo_occ>0])
+        if self.basis=='iao':
+            ovlp_ff, ovlp_fc = self.fc_ints.calc_ao_ovlp(moC_occ=self.moC)
         else:
             ovlp_ff, ovlp_fc = self.fc_ints.calc_ao_ovlp()
 
@@ -154,20 +156,26 @@ if __name__ == '__main__':
     """
     
     mol = pyscf.M(atom=coords,basis='ccpvdz',verbose=4)
+    mol.pseudo='gth-hfrev'
+    mol.build()
     mf = mol.RHF().run()
     
     # calculate localized orbital energies/coefficients
     frag_inds=[0,1]
-    basis_occ='iao'
+    basis_occ='minao'
     basis_vir=mol.basis
-    cutoff_occ=0.1
-    cutoff_vir=0.0
-    re = rRegionalEmbedding(mf, frag_inds, 'atom', basis_occ, basis_vir, cutoff_occ, cutoff_vir, orth=False)
+    cutoff_occ=0.001
+    cutoff_vir=0.001
+    re = rRegionalEmbedding(mf, frag_inds, 'atom', basis_occ, basis_occ, cutoff_occ, cutoff_vir, orth=False)
     moE_new, moC_new, indx_frz = re.kernel()
     
     # embedded
-    mycc = pyscf.cc.CCSD(mf)
-    mycc = mycc.density_fit(auxbasis='ccpvtzri')
-    mycc.mo_coeff = moC_new
-    mycc.frozen = indx_frz
+    from pyscf.data import elements
+    elements.chemcore(mol)
+    
+    mycc = pyscf.cc.CCSD(mf).set_frozen()
+    
+    mycc = mycc.density_fit(auxbasis='ccpvdzri')
+    # mycc.mo_coeff = moC_new
+    # mycc.frozen = indx_frz
     mycc.run()

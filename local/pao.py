@@ -163,7 +163,7 @@ if __name__ == '__main__':
     #%%
     frag_inds=[0,1]
     occ_calc = rPAO(mf, frag_inds, 'occ', cutoff_type='norb', cutoff=10)
-    vir_calc = None#rPAO(mf, frag_inds, 'vir', cutoff=0.1)
+    vir_calc = rPAO(mf, frag_inds, 'vir', cutoff=0.1)
     
     embed = rWVFEmbedding(occ_calc, vir_calc)
     moE_new, moC_new, indx_frz = embed.calc_mo()

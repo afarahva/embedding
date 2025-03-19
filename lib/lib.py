@@ -10,9 +10,11 @@ author: Ardavan Farahvash, github.com/afarahva
 
 import numpy as np
 from scipy.linalg import eigh
-from pyscf import gto
 from pyscf import lo
 
+from pyscf.gto import intor_cross as mol_intor_cross
+from pyscf.pbc.gto import intor_cross as pbc_intor_cross
+        
 def matrix_projection(M, P, S=None):
     """
     Generalized Matrix Projection Function
@@ -81,42 +83,21 @@ def matrix_projection_eigh(M, P, S=None):
     
     return E_P, C_P
 
-def orbital_center(mol, orb_coeff):
-    """
-    Compute the expectation values of x, y, z for a given orbital.
-
-    Parameters
-    ----------
-    mol : pyscf.gto.Mole
-        A PySCF Mole object that has been built and initialized.
-    orb_coeff : np.ndarray
-        orbital coefficients of shape (n_bas, n_orb). 
-
-    Returns
-    -------
-    center : np.ndarray
-        A length-3 numpy array [ <x>, <y>, <z> ] for the chosen orbital.
-    """
-
-    x, y, z = mol.intor('int1e_r')
-
-    cx = orb_coeff.conj().T @ x @ orb_coeff
-    cy = orb_coeff.conj().T @ y @ orb_coeff
-    cz = orb_coeff.conj().T @ z @ orb_coeff
-
-    return np.array([ np.diag(cx), np.diag(cy), np.diag(cz)]).T
-
 class FC_AO_Ints:
     """
     Class for generating orbital overlap integrals between the AOs of a 
     composite system and localized orbitals of a fragment. 
+    
+    Automatically detects whether the given object is mol or cell and adjusts 
+    accordingly.
     """
     
-    def __init__(self, mol_comp, frag_inds, frag_inds_type='atom', basis_frag=None, orth=False):
+    def __init__(self, mol_or_cell, frag_inds, frag_inds_type='atom', 
+                 basis_frag=None, orth=False):
         """
         Parameters
         ----------
-        mol : PySCF mol object for composite system
+        mol_or_cell : PySCF mol/cell object for composite system
         
         frag_inds : String
             Fragment indices
@@ -131,20 +112,21 @@ class FC_AO_Ints:
             Whether to orthogonalization fragment orbitals. Default is False.
         """
         
-        self.mol = mol_comp
+        self.mol = mol_or_cell
                     
         # define fragment basis set
         if basis_frag is None:
             self.basis = self.mol.basis
+        elif basis_frag == 'iao':
+            self.basis='minao'
         else:
             self.basis = basis_frag
         
         # determine indices of orbitals belonging to fragment
-        if self.basis.lower()!='iao':
-            self.mol2 = gto.M(atom=self.mol._atom, basis=self.basis, spin=0, unit='Bohr')
-        else:
-            self.mol2 = gto.M(atom=self.mol._atom, basis='minao', spin=0, unit='Bohr')
-        
+        self.mol2 = self.mol.copy()
+        self.mol2.basis = self.basis
+        self.mol2.build()
+
         if frag_inds_type.lower() == "atom":
             self.frag_atm_inds = frag_inds
             self.frag_ao_inds = np.concatenate([range(p0,p1) for b0,b1,p0,p1 in
@@ -175,20 +157,35 @@ class FC_AO_Ints:
         s_ff : fragment-fragment overlap integral
         s_fc : fragment-composite overlap integral
         """
-        
+            
         # special case, intrinsic atomic orbitals
-        if self.basis.lower()=='iao':
+        if self.basis=='iao':
+            
+            # check mol or cell
+            if getattr(self.mol, 'pbc_intor', None) is None: # mol
+                s_all = self.mol.intor_symmetric('int1e_ovlp')
+            else:
+                s_all = self.mol.pbc_intor('int1e_ovlp', hermi=1)
+                
             c_iao = lo.iao.iao(self.mol, moC_occ)
-            s_all = self.mol.intor_symmetric('int1e_ovlp')
             s_ff = (c_iao.T @ s_all @ c_iao)[np.ix_(self.frag_ao_inds,self.frag_ao_inds)]
             s_fc = (c_iao.T @ s_all)[self.frag_ao_inds]
-           
+        
+        # all other cases
         else:
+            # check mol or cell
+            if getattr(self.mol2, 'pbc_intor', None) is None: # mol
+                s_all = self.mol.intor_symmetric('int1e_ovlp')
+                intor_cross = mol_intor_cross
+            else:
+                s_all = self.mol2.pbc_intor('int1e_ovlp', hermi=1)
+                intor_cross = pbc_intor_cross
+                
             # < frag AO | frag AO > overlap
-            s_ff = self.mol2.intor_symmetric('int1e_ovlp')[np.ix_(self.frag_ao_inds,self.frag_ao_inds)]
+            s_ff = s_all[np.ix_(self.frag_ao_inds,self.frag_ao_inds)]
             
             # < frag AO | composite AO > overlap
-            s_fc = gto.mole.intor_cross('int1e_ovlp', self.mol2, self.mol)[self.frag_ao_inds]
+            s_fc = intor_cross('int1e_ovlp', self.mol2, self.mol)[self.frag_ao_inds]
                 
             # orthogonalize frag AOs and return orthogonalized overlap integrals
             if self.orth:
@@ -250,7 +247,7 @@ class FC_AO_Ints:
             Total population of MOs in fragment
         """
         _, C_f_mo = self.calc_mo_ovlp(c_mo)
-        pop = np,sum( np.abs(C_f_mo)**2, axis=1)
+        pop = np.sum( np.abs(C_f_mo)**2, axis=1)
         return pop
     
     def lowdin(self, s_ff, s_fc):
@@ -262,7 +259,6 @@ class FC_AO_Ints:
         s_ff = C_fo.T @ s_ff @ C_fo
 
         return s_ff, s_fc    
-
     
 class rUnitaryActiveSpace:
     """
@@ -300,7 +296,7 @@ class rUnitaryActiveSpace:
     def calc_projection(self):
         pass
     
-    def __init__(self, mf, mo_occ_type):
+    def __init__(self, mf, mo_occ_type, frozen_core=False):
         """
 
         Parameters
@@ -314,6 +310,17 @@ class rUnitaryActiveSpace:
         self.mo_space = mo_occ_type
         
         mo_coeff, mo_energy, mo_occ = mf.mo_coeff, mf.mo_energy, mf.mo_occ
+        
+        # check mol or pbc
+        if type(mo_coeff) == list:
+            if len(mo_coeff) > 1 or len(mo_energy) > 1 or len(mo_occ) > 1:
+                raise NotImplementedError(" Multiple k-point embedding is not supported. ")
+            else:
+                mo_coeff, mo_energy, mo_occ = mo_coeff[0], mo_energy[0], mo_occ[0]
+                
+        if type(mo_coeff) == np.ndarray and len(mo_coeff.shape) > 2:
+                raise NotImplementedError(" Unrestricted references are not supported. ")
+            
         
         mask_occ = mo_occ > 1e-10
         mask_vir = (mask_occ==False)
@@ -367,6 +374,7 @@ class rUnitaryActiveSpace:
     def calc_mo(self):
         """
         Calculate active and frozen pseudocanonical MOs
+        
         Returns
         -------
         moE : Numpy Array
@@ -376,7 +384,6 @@ class rUnitaryActiveSpace:
         mask_act : Numpy Array
             mask for which orbitals are active.
         """
-        
         
         # project fock matrix
         self.calc_projection()
