@@ -30,7 +30,7 @@ class rRegionalActiveSpace(rUnitaryActiveSpace):
     
     def __init__(self, mf, frag_inds, mo_occ_type, 
                  frag_inds_type="atom", basis='minao', orth=False,
-                 cutoff_type="overlap", cutoff=0.1, frozen_core=False):
+                 cutoff_type="overlap", cutoff=0.1, **kwargs):
         """
         
         Parameters
@@ -59,6 +59,9 @@ class rRegionalActiveSpace(rUnitaryActiveSpace):
             'overlap' (default) assigns active MOs as those with a higher
             overlap value than the cutoff specified. 
             
+            'spade' assigns active MOs based on the spade approach, using the
+            inflection point of the occupancy curve.
+            
             'pct_occ' assigns active MOs as those with the higest overlap with 
             the fragment until a percentage of the total overlap is reached.
             
@@ -68,13 +71,15 @@ class rRegionalActiveSpace(rUnitaryActiveSpace):
         orth : Bool
             Whether to orthogonalization fragment orbitals. Default is False.
         """
-        super().__init__(mf,mo_occ_type)
+        super().__init__(mf,mo_occ_type,**kwargs)
         self.cutoff=cutoff
         self.cutoff_type = cutoff_type
         self.basis=basis
         self.fc_ints = FC_AO_Ints(mf.mol, frag_inds, frag_inds_type=frag_inds_type, basis_frag=basis, orth=orth)
         
-    def calc_projection(self):
+    def calc_projection(self,debug=False):
+        
+        # compute projection operator 
         if self.basis=='iao':
             ovlp_ff, ovlp_fc = self.fc_ints.calc_ao_ovlp(moC_occ=self.moC)
         else:
@@ -82,15 +87,21 @@ class rRegionalActiveSpace(rUnitaryActiveSpace):
 
         ovlp_f_mo = ovlp_fc @ self.moC
         
-        #
         P_proj = ovlp_f_mo.conj().T @ np.linalg.inv(ovlp_ff) @ ovlp_f_mo
-        self.P_proj = P_proj
+        
+        # diagonalize 
         s,u = np.linalg.eigh(P_proj)
         s[s < 0] = 0
         
-        # indices of active orbitals
+        # select indices of active orbitals
         if self.cutoff_type.lower() in ['overlap','pop','population']:
             mask_act = s >= self.cutoff
+            
+        elif self.cutoff_type.lower() in ['spade']:
+            ds = s[1:] - s[0:-1]
+            indx_max = np.argmax(ds)
+            mask_act = np.zeros(len(s), dtype=bool)
+            mask_act[indx_max+1:] = True
             
         elif self.cutoff_type.lower() in ['pct_occ','occ']:
             cumsum = np.cumsum(s[::-1]/np.sum(s))[::-1]
@@ -103,10 +114,18 @@ class rRegionalActiveSpace(rUnitaryActiveSpace):
 
         else:
             raise ValueError("Incorrect cutoff type. Must be one of 'overlap', 'pct_occ' or 'Norb'" )
-            
+        
+        # construct unitary projector 
         self.P_act = u[:,mask_act]
         self.P_frz = u[:,~mask_act]
         self.Norb_act = np.sum(mask_act)
+        
+        # set more object attributes if debugger is called
+        if debug:
+            self.P_proj = P_proj
+            self.s_proj = s
+            self.ds_proj = ds
+            self.mask_act = mask_act
         
         return self.P_act, self.P_frz
 
@@ -117,15 +136,15 @@ class rRegionalEmbedding(rWVFEmbedding):
     
     def __init__(self, mf, frag_inds, frag_inds_type='atom', basis_occ='minao', 
                  basis_vir=None, cutoff_occ=0.1, cutoff_vir=0.1, 
-                 cutoff_type='overlap', orth=None):
+                 cutoff_type='overlap', orth=None, frozen_core=False):
         
         self.occ_calc = rRegionalActiveSpace(mf, frag_inds, 'occupied', 
             frag_inds_type=frag_inds_type, basis=basis_occ, cutoff=cutoff_occ, 
-            cutoff_type=cutoff_type, orth=orth)
+            cutoff_type=cutoff_type, orth=orth,frozen_core=frozen_core)
         
         self.vir_calc = rRegionalActiveSpace(mf, frag_inds, 'virtual', 
             frag_inds_type=frag_inds_type, basis=basis_vir, cutoff=cutoff_vir, 
-            cutoff_type=cutoff_type, orth=orth)
+            cutoff_type=cutoff_type, orth=orth,frozen_core=False)
          
     def kernel(self):
         moE_embed, moC_embed, indx_frz = super().calc_mo()
@@ -137,7 +156,6 @@ class rRegionalEmbedding(rWVFEmbedding):
 if __name__ == '__main__':
     import pyscf
     from pyscf.tools import cubegen
-    
     coords = \
     """
     O         -3.65830        0.00520       -0.94634
@@ -156,7 +174,6 @@ if __name__ == '__main__':
     """
     
     mol = pyscf.M(atom=coords,basis='ccpvdz',verbose=4)
-    mol.pseudo='gth-hfrev'
     mol.build()
     mf = mol.RHF().run()
     
@@ -164,18 +181,52 @@ if __name__ == '__main__':
     frag_inds=[0,1]
     basis_occ='minao'
     basis_vir=mol.basis
-    cutoff_occ=0.001
-    cutoff_vir=0.001
-    re = rRegionalEmbedding(mf, frag_inds, 'atom', basis_occ, basis_occ, cutoff_occ, cutoff_vir, orth=False)
-    moE_new, moC_new, indx_frz = re.kernel()
+    cutoff_occ=0.1
+    cutoff_vir=0.1
     
-    # embedded
-    from pyscf.data import elements
-    elements.chemcore(mol)
-    
-    mycc = pyscf.cc.CCSD(mf).set_frozen()
-    
-    mycc = mycc.density_fit(auxbasis='ccpvdzri')
-    # mycc.mo_coeff = moC_new
-    # mycc.frozen = indx_frz
+    # traditional regional embedding
+    re = rRegionalEmbedding(mf, frag_inds, 'atom', basis_occ, basis_vir, cutoff_occ, cutoff_vir, orth=False, frozen_core=True)
+    moE_re, moC_new, indx_frz_re = re.kernel()
+    mycc = pyscf.cc.CCSD(mf)
+    mycc.mo_coeff = moC_new
+    mycc.frozen = indx_frz_re
     mycc.run()
+    print(mycc.e_corr)
+    
+    # spade embedding
+    occ_calc = rRegionalActiveSpace(mf, frag_inds, 'occ', basis='minao', cutoff_type='spade', frozen_core=True)
+    vir_calc = rRegionalActiveSpace(mf, frag_inds, 'vir', basis=mol.basis, cutoff_type='spade', frozen_core=False)
+    embed = rWVFEmbedding(occ_calc, vir_calc)
+    moE_spade, moC_new, indx_frz_spade = embed.calc_mo()
+    
+    mycc.mo_coeff = moC_new
+    mycc.frozen = indx_frz_spade
+    mycc.run()
+    print(mycc.e_corr)
+    
+    #%%
+    # compare regional embedding versus spade
+    occ_calc.calc_projection(debug=True)
+    s = occ_calc.s_proj
+    ds = occ_calc.ds_proj
+    mask_act = occ_calc.mask_act
+
+    from matplotlib import pyplot as plt
+    plt.figure()
+    plt.plot(s)
+    plt.plot(ds)
+    plt.plot(mask_act)
+    
+    vir_calc.calc_projection(debug=True)
+    s = vir_calc.s_proj
+    ds = vir_calc.ds_proj
+    mask_act = vir_calc.mask_act
+
+    from matplotlib import pyplot as plt
+    plt.figure()
+    plt.plot(s)
+    plt.plot(ds)
+    plt.plot(mask_act)
+
+
+    

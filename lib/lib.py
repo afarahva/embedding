@@ -7,14 +7,19 @@ Library of functions and classes for PySCF embedding code
 
 author: Ardavan Farahvash, github.com/afarahva
 """
+import sys
 
 import numpy as np
 from scipy.linalg import eigh
-from pyscf import lo
 
+from pyscf.lib import logger
+from pyscf.data import elements
+from pyscf import lo
 from pyscf.gto import intor_cross as mol_intor_cross
 from pyscf.pbc.gto import intor_cross as pbc_intor_cross
-        
+
+OCCUPATION_CUTOFF=1e-10
+
 def matrix_projection(M, P, S=None):
     """
     Generalized Matrix Projection Function
@@ -175,7 +180,7 @@ class FC_AO_Ints:
         else:
             # check mol or cell
             if getattr(self.mol2, 'pbc_intor', None) is None: # mol
-                s_all = self.mol.intor_symmetric('int1e_ovlp')
+                s_all = self.mol2.intor_symmetric('int1e_ovlp')
                 intor_cross = mol_intor_cross
             else:
                 s_all = self.mol2.pbc_intor('int1e_ovlp', hermi=1)
@@ -278,6 +283,8 @@ class rUnitaryActiveSpace:
 
     Methods
     -------
+    init()
+        initializes object and sets attributes/options
     calc_projection()
         empty method, replace with a function that calculates the projection
         matrix
@@ -296,7 +303,9 @@ class rUnitaryActiveSpace:
     def calc_projection(self):
         pass
     
-    def __init__(self, mf, mo_occ_type, frozen_core=False):
+    def __init__(self, mf, mo_occ_type, 
+                 canon_active=None, canon_frozen=None, 
+                 frozen_core=False):
         """
 
         Parameters
@@ -304,43 +313,111 @@ class rUnitaryActiveSpace:
         mf : PySCF Resctricted Mean-Field Object
         mo_occ_type : String,
             Which MO space to rotate (must be either 'occupied' or 'virtual').
-
+            
+        OPTIONAL
+        ----------
+        canon_active : Iterable,
+            allows user to preselect indices of some canonical MOs as active.
+            
+        canon_frozen : Iterable,
+            allows user to preselect indices of some canonical MOs as frozen.
+            
+        frozen_core : Bool, whether to freeze all core MOs in embedding.
         """
+        
+        # copy mean field object
         self.mf=mf
+        self.verbose = mf.verbose
+        self.stdout = mf.stdout
+        
+        # which space are we rotating
         self.mo_space = mo_occ_type
+        
+        # create logger
+        self.log = logger.new_logger(self)
+        
         
         mo_coeff, mo_energy, mo_occ = mf.mo_coeff, mf.mo_energy, mf.mo_occ
         
         # check mol or pbc
         if type(mo_coeff) == list:
             if len(mo_coeff) > 1 or len(mo_energy) > 1 or len(mo_occ) > 1:
-                raise NotImplementedError(" Multiple k-point embedding is not supported. ")
+                self.log.error(" ERROR: Multiple k-point embedding is not supported. ")
+                sys.exit()
+                
             else:
                 mo_coeff, mo_energy, mo_occ = mo_coeff[0], mo_energy[0], mo_occ[0]
                 
         if type(mo_coeff) == np.ndarray and len(mo_coeff.shape) > 2:
-                raise NotImplementedError(" Unrestricted references are not supported. ")
-            
-        
-        mask_occ = mo_occ > 1e-10
+                self.log.error(" ERROR: Unrestricted references are not supported.  ")
+                sys.exit()
+
+        # seperate occupied/virtual orbitals
+        mask_occ = mo_occ >= OCCUPATION_CUTOFF
         mask_vir = (mask_occ==False)
-         
         moE_occ = mo_energy[mask_occ]
         moE_vir = mo_energy[mask_vir]
         moC_occ = mo_coeff[:,mask_occ]
         moC_vir = mo_coeff[:,mask_vir]
         
+        
+        # seperate some canonical orbitals from the set that enters embedding 
+        # calculation
+        indx_cact = []
+        indx_cfrz = []
+        
+        if canon_frozen is not None:
+            if  isinstance(frozen_core,(list,np.ndarray)):
+                indx_cfrz = canon_frozen.astype(np.int64)
+            else:
+                self.log.error(" 'canon_frozen' must be an array of orbital indices.")
+                sys.exit()
+                
+        if frozen_core:
+            if self.mo_space.lower() in ['v','vir','virtual']:
+                self.log.error(" ERROR: cannot freeze core MOs for virtual active space ")
+                sys.exit()
+            indx_core = np.arange(0,elements.chemcore(self.mf.mol),dtype=np.int64)
+            indx_cfrz = np.unique(np.hstack( [indx_core, indx_cfrz]).astype(np.int64))
+            
+        if canon_active is not None:
+            if  isinstance(frozen_core,(list,np.ndarray)):
+                indx_cact = canon_active.astype(np.int64)
+            else:
+                self.log.error(" 'canon_frozen' must be an array of orbital indices.")
+                sys.exit()
+            
+        indx_c = np.hstack([indx_cact,indx_cfrz]).astype(np.int64)
+
+        # seperate MOs to use in embedding versus canonical MOs
         if self.mo_space.lower() in ['o','occ','occupied']:
-            self.moE = moE_occ 
-            self.moC = moC_occ
+            
+            # canonical active/frozen orbitals
+            self.moE_cact = moE_occ[indx_cact] 
+            self.moE_cfrz = moE_occ[indx_cfrz] 
+            self.moC_cact = moC_occ[:,indx_cact] 
+            self.moC_cfrz = moC_occ[:,indx_cfrz]
+            
+            # orbitals to embed
+            self.moE = np.delete(moE_occ,indx_c) if len(indx_c) > 0 else moE_occ
+            self.moC = np.delete(moC_occ,indx_c,axis=1) if len(indx_c) > 0 else moC_occ
         
         elif self.mo_space.lower() in ['v','vir','virtual']:
-            self.moE = moE_vir
-            self.moC = moC_vir
+            
+            # canonical active/frozen orbitals
+            self.moE_cact = moE_vir[indx_cact] 
+            self.moE_cfrz = moE_vir[indx_cfrz] 
+            self.moC_cact = moC_vir[:,indx_cact] 
+            self.moC_cfrz = moC_vir[:,indx_cfrz]
+            
+            # orbitals to embed
+            self.moE = np.delete(moE_vir,indx_c) if len(indx_c) > 0 else moE_vir
+            self.moC = np.delete(moC_vir,indx_c,axis=1) if len(indx_c) > 0 else moC_vir
         
         else:
-            raise ValueError(" 'mo_occ_type' must be either 'occupied' or 'virtual' ")
-            
+            self.log.error(" 'mo_occ_type' must be either 'occupied' or 'virtual' ")
+            sys.exit()
+                        
         self.Nmo, self.Nocc, self.Nvir = len(mo_energy), len(moE_occ), len(moE_vir)
         pass
         
@@ -371,7 +448,7 @@ class rUnitaryActiveSpace:
             
         return E_P, C_P    
         
-    def calc_mo(self):
+    def calc_mo(self,debug=False):
         """
         Calculate active and frozen pseudocanonical MOs
         
@@ -386,15 +463,18 @@ class rUnitaryActiveSpace:
         """
         
         # project fock matrix
-        self.calc_projection()
+        self.calc_projection(debug=debug)
         
         # calculate projected MOs
         if self.P_act is not None:
             moE_act,moC_act = self.pseudocanonical(self.moE,self.moC,self.P_act)
-            moE_frz,moC_frz = self.pseudocanonical(self.moE,self.moC,self.P_frz)            
-            moC = np.hstack([moC_act,moC_frz])
-            moE = np.hstack([moE_act,moE_frz])
+            moE_frz,moC_frz = self.pseudocanonical(self.moE,self.moC,self.P_frz)
+            
+            moC = np.hstack([self.moC_cact, moC_act, moC_frz, self.moC_cfrz])
+            moE = np.hstack([self.moE_cact, moE_act, moE_frz, self.moE_cfrz])
+            
             mask_act = np.arange(len(moE)) < self.Norb_act
+            
         else:
             mask_act = np.array([True]*len(moE))
         

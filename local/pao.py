@@ -18,7 +18,7 @@ from pyscf_embedding.lib  import rUnitaryActiveSpace, rWVFEmbedding
 class rPAO(rUnitaryActiveSpace):
     
     def __init__(self, mf, frag_inds, mo_occ_type, 
-                 frag_inds_type='atom', cutoff_type="overlap", cutoff=0.1, scutoff=1e-3):
+                 frag_inds_type='atom', cutoff_type="overlap", cutoff=0.1, scutoff=1e-3, **kwargs):
         """
         Parameters
         ----------
@@ -48,7 +48,7 @@ class rPAO(rUnitaryActiveSpace):
             'norb' assigns active MOs as those with the higest overlap with 
             the fragment until the cutoff.  d
         """
-        super().__init__(mf,mo_occ_type)
+        super().__init__(mf,mo_occ_type,**kwargs)
         self.cutoff=cutoff
         self.scutoff = scutoff
         self.cutoff_type = cutoff_type
@@ -66,7 +66,7 @@ class rPAO(rUnitaryActiveSpace):
             raise ValueError("frag_inds_type must be either 'atom' or 'orbital'")
 
         
-    def calc_projection(self):
+    def calc_projection(self,**kwargs):
         
         S = self.mf.get_ovlp()
         
@@ -98,13 +98,9 @@ class rPAO(rUnitaryActiveSpace):
             raise ValueError("Incorrect cutoff type. Must be one of 'overlap', or 'norb'" )
             
         C_pao_frag = C_pao[:,mask]
-        
-        # Orthonormalize fragment PAOs amongst each other
-        S_pao_frag = C_pao_frag.T @ S @ C_pao_frag
-        Norm = np.diag(S_pao_frag)
-        C_pao_frag =  C_pao_frag/np.sqrt(Norm)[None,:]
         S_pao_frag = C_pao_frag.T @ S @ C_pao_frag
 
+        # Orthonormalize fragment PAOs amongst each other
         s,v = np.linalg.eigh(S_pao_frag)
         mask = s > self.scutoff
         C_pao_active = np.einsum("ab,ia->ib",v[:,mask]/ np.sqrt(s[None,mask]),C_pao_frag)
