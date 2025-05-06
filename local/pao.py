@@ -66,20 +66,14 @@ class rPAO(rUnitaryActiveSpace):
             raise ValueError("frag_inds_type must be either 'atom' or 'orbital'")
 
         
-    def calc_projection(self,**kwargs):
+    def calc_projection(self,debug=False):
         
         S = self.mf.get_ovlp()
         
         ### Generate active PAOs
         
         # Construct PAOs in AO basis
-        if self.mo_space.lower() in ['o','occ','occupied']:
-            P = self.moC @ self.moC.T
-        elif self.mo_space.lower() in ['v','vir','virtual']:
-            P = self.moC @ self.moC.T
-        else:
-            raise ValueError ("mo_occ_type  must be one of 'occ' or 'vir'")
-            
+        P = self.moC @ self.moC.T
         C_pao = P@S # unnormalized PAOs
         
         # Calculate population of PAOs on fragment atoms and keep only those 
@@ -104,17 +98,14 @@ class rPAO(rUnitaryActiveSpace):
         C_pao_active = np.einsum("ab,ia->ib",v[:,mask]/ np.sqrt(s[None,mask]),C_pao_frag)
         
         # Generate Bath/Frozen PAOs
-        C_pao_bath =  P @ S - C_pao_active@C_pao_active.T@S
+        C_pao_bath =  C_pao - C_pao_active@C_pao_active.T@S
         S_pao_bath = C_pao_bath.T @ S @ C_pao_bath
         s,v = np.linalg.eigh(S_pao_bath)
         
-        mask = np.array( [False] * (self.Nmo))
-        if self.mo_space.lower() in ['o','occ','occupied']:
-            mask[self.Nvir+C_pao_active.shape[1]:] = True
-        
-        elif self.mo_space.lower() in ['v','vir','virtual']:
-            mask[self.Nocc+C_pao_active.shape[1]:] = True
-        
+        mask = np.array( [False] * (len(s)))
+        delmo = self.moC.shape[1] - C_pao_active.shape[1]
+        if delmo > 0:
+            mask[-delmo:] = True
         C_pao_frozen = np.einsum("ab,ia->ib",v[:,mask]/ np.sqrt(s[None,mask]),C_pao_bath)
         
         # Concatenate active and frozen PAOs
@@ -127,6 +118,12 @@ class rPAO(rUnitaryActiveSpace):
         self.Norb_act = C_pao_active.shape[1]
         self.P_act = u[:,0:self.Norb_act]
         self.P_frz = u[:,self.Norb_act:]
+        
+        if debug:
+            self.C_pao_frag=C_pao_frag
+            self.C_pao_active=C_pao_active
+            self.C_pao_bath=C_pao_bath
+            self.C_pao_frozen=C_pao_frozen
         
         return self.P_act, self.P_frz
     
