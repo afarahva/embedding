@@ -18,7 +18,7 @@ from pyscf_embedding.lib  import rUnitaryActiveSpace, rWVFEmbedding
 class rPAO(rUnitaryActiveSpace):
     
     def __init__(self, mf, frag_inds, mo_occ_type, frag_inds_type='atom', 
-        cutoff_type="overlap", cutoff=0.1, scutoff=1e-3, frozen_core=False):
+        cutoff_type="overlap", cutoff=0.1, scutoff=1e-3):
         """
         Parameters
         ----------
@@ -48,7 +48,7 @@ class rPAO(rUnitaryActiveSpace):
             'norb' assigns active MOs as those with the higest overlap with 
             the fragment until the cutoff.  d
         """
-        super().__init__(mf, mo_coeff=mo_occ_type, frozen_core=frozen_core)
+        super().__init__(mf, mo_coeff=mo_occ_type)
         self.cutoff=cutoff
         self.scutoff = scutoff
         self.cutoff_type = cutoff_type
@@ -74,15 +74,13 @@ class rPAO(rUnitaryActiveSpace):
         
         # Construct PAOs in AO basis
         if self.mo_space.lower() in ['o','occ','occupied']:
-            C = self.mf.mo_coeff[:,self.mf.mo_occ < 1]
-            P = C @ C.T
+            P = self.moC @ self.moC.T
         elif self.mo_space.lower() in ['v','vir','virtual']:
-            C = self.mf.mo_coeff[:,self.mf.mo_occ >= 1]
-            P = C @ C.T
+            P = self.moC @ self.moC.T
         else:
             raise ValueError ("mo_occ_type  must be one of 'occ' or 'vir'")
             
-        C_pao = (np.eye(P.shape[0]) - P @ S) # unnormalized PAOs
+        C_pao = P@S # unnormalized PAOs
         
         # Calculate population of PAOs on fragment atoms and keep only those 
         # with significant population
@@ -106,7 +104,7 @@ class rPAO(rUnitaryActiveSpace):
         C_pao_active = np.einsum("ab,ia->ib",v[:,mask]/ np.sqrt(s[None,mask]),C_pao_frag)
         
         # Generate Bath/Frozen PAOs
-        C_pao_bath =  (np.eye(P.shape[0]) - P @ S - C_pao_active@C_pao_active.T@S)
+        C_pao_bath =  P @ S - C_pao_active@C_pao_active.T@S
         S_pao_bath = C_pao_bath.T @ S @ C_pao_bath
         s,v = np.linalg.eigh(S_pao_bath)
         
