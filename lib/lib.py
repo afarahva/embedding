@@ -13,12 +13,35 @@ import numpy as np
 from scipy.linalg import eigh
 
 from pyscf.lib import logger
-from pyscf.data import elements
 from pyscf import lo
 from pyscf.gto import intor_cross as mol_intor_cross
 from pyscf.pbc.gto import intor_cross as pbc_intor_cross
 
 OCCUPATION_CUTOFF=1e-10
+
+def chemcore(mol, atm_indx=None, spinorb=False):
+    """
+    Get number of core electrons 
+    """
+    from pyscf.data.elements import charge, chemcore_atm
+    core = 0
+    if atm_indx is None:
+        atm_indx = range(mol.natm)
+    
+    for a in atm_indx:
+        atm_nelec = mol.atom_charge(a)
+        atm_z = charge(mol.atom_symbol(a))
+        ne_ecp = atm_z - atm_nelec
+        ncore_ecp = ne_ecp // 2
+        atm_ncore = chemcore_atm[atm_z]
+        if ncore_ecp > atm_ncore:
+            core += 0
+        else:
+            core += atm_ncore - ncore_ecp
+
+    if spinorb:
+        core *= 2
+    return core
 
 def matrix_projection(M, P, S=None):
     """
@@ -283,7 +306,7 @@ class rUnitaryActiveSpace:
 
     Methods
     -------
-    init()
+    init(mf, mo_coeff, frozen_core)
         initializes object and sets attributes/options
     calc_projection()
         empty method, replace with a function that calculates the projection
@@ -303,25 +326,27 @@ class rUnitaryActiveSpace:
     def calc_projection(self):
         pass
     
-    def __init__(self, mf, mo_occ_type, 
-                 canon_active=None, canon_frozen=None, 
-                 frozen_core=False):
+    def __init__(self, mf, mo_coeff="occupied", frozen_core=False):
         """
 
         Parameters
         ----------
         mf : PySCF Resctricted Mean-Field Object
-        mo_occ_type : String,
-            Which MO space to rotate (must be either 'occupied' or 'virtual').
+        
+        mo_coeff : string numpy Numpy Array
+            If "occupied", "occ", or "o" is provided, rotation is done on the
+            canonical occupied orbitals
+             
+            If "virtual", "vir", or "v" is provided, rotation is done on the
+            canonical virtual orbitals
+            
+            If a numpy array of mo coefficients is provided, 
+            embedding is done using the orbitals provided in the array (nAO x nMO)
             
         OPTIONAL
         ----------
-        canon_active : Iterable,
-            allows user to preselect indices of some canonical MOs as active.
-            
-        canon_frozen : Iterable,
-            allows user to preselect indices of some canonical MOs as frozen.
-            
+        mo_coeff/mo_occ : Uses user provided coefficients/occupancies
+        instead of those within mf.
         frozen_core : Bool, whether to freeze all core MOs in embedding.
         """
         
@@ -329,96 +354,57 @@ class rUnitaryActiveSpace:
         self.mf=mf
         self.verbose = mf.verbose
         self.stdout = mf.stdout
-        
-        # which space are we rotating
-        self.mo_space = mo_occ_type
+        self.frozen_core = frozen_core
         
         # create logger
         self.log = logger.new_logger(self)
         
-        
-        mo_coeff, mo_energy, mo_occ = mf.mo_coeff, mf.mo_energy, mf.mo_occ
-        
         # check mol or pbc
         if type(mo_coeff) == list:
-            if len(mo_coeff) > 1 or len(mo_energy) > 1 or len(mo_occ) > 1:
-                self.log.error(" ERROR: Multiple k-point embedding is not supported. ")
-                sys.exit()
-                
-            else:
-                mo_coeff, mo_energy, mo_occ = mo_coeff[0], mo_energy[0], mo_occ[0]
+            self.log.error(" Multiple k-point embedding is not supported. ")
+            sys.exit()
                 
         if type(mo_coeff) == np.ndarray and len(mo_coeff.shape) > 2:
-                self.log.error(" ERROR: Unrestricted references are not supported.  ")
-                sys.exit()
-
-        # seperate occupied/virtual orbitals
-        mask_occ = mo_occ >= OCCUPATION_CUTOFF
-        mask_vir = (mask_occ==False)
-        moE_occ = mo_energy[mask_occ]
-        moE_vir = mo_energy[mask_vir]
-        moC_occ = mo_coeff[:,mask_occ]
-        moC_vir = mo_coeff[:,mask_vir]
-        
-        
-        # seperate some canonical orbitals from the set that enters embedding 
-        # calculation
-        indx_cact = []
-        indx_cfrz = []
-        
-        if canon_frozen is not None:
-            if  isinstance(frozen_core,(list,np.ndarray)):
-                indx_cfrz = canon_frozen.astype(np.int64)
-            else:
-                self.log.error(" 'canon_frozen' must be an array of orbital indices.")
-                sys.exit()
-                
-        if frozen_core:
-            if self.mo_space.lower() in ['v','vir','virtual']:
-                self.log.error(" ERROR: cannot freeze core MOs for virtual active space ")
-                sys.exit()
-            indx_core = np.arange(0,elements.chemcore(self.mf.mol),dtype=np.int64)
-            indx_cfrz = np.unique(np.hstack( [indx_core, indx_cfrz]).astype(np.int64))
-            
-        if canon_active is not None:
-            if  isinstance(frozen_core,(list,np.ndarray)):
-                indx_cact = canon_active.astype(np.int64)
-            else:
-                self.log.error(" 'canon_frozen' must be an array of orbital indices.")
-                sys.exit()
-            
-        indx_c = np.hstack([indx_cact,indx_cfrz]).astype(np.int64)
-
-        # seperate MOs to use in embedding versus canonical MOs
-        if self.mo_space.lower() in ['o','occ','occupied']:
-            
-            # canonical active/frozen orbitals
-            self.moE_cact = moE_occ[indx_cact] 
-            self.moE_cfrz = moE_occ[indx_cfrz] 
-            self.moC_cact = moC_occ[:,indx_cact] 
-            self.moC_cfrz = moC_occ[:,indx_cfrz]
-            
-            # orbitals to embed
-            self.moE = np.delete(moE_occ,indx_c) if len(indx_c) > 0 else moE_occ
-            self.moC = np.delete(moC_occ,indx_c,axis=1) if len(indx_c) > 0 else moC_occ
-        
-        elif self.mo_space.lower() in ['v','vir','virtual']:
-            
-            # canonical active/frozen orbitals
-            self.moE_cact = moE_vir[indx_cact] 
-            self.moE_cfrz = moE_vir[indx_cfrz] 
-            self.moC_cact = moC_vir[:,indx_cact] 
-            self.moC_cfrz = moC_vir[:,indx_cfrz]
-            
-            # orbitals to embed
-            self.moE = np.delete(moE_vir,indx_c) if len(indx_c) > 0 else moE_vir
-            self.moC = np.delete(moC_vir,indx_c,axis=1) if len(indx_c) > 0 else moC_vir
-        
-        else:
-            self.log.error(" 'mo_occ_type' must be either 'occupied' or 'virtual' ")
+            self.log.error(" Unrestricted references are not supported.  ")
             sys.exit()
-                        
-        self.Nmo, self.Nocc, self.Nvir = len(mo_energy), len(moE_occ), len(moE_vir)
+            
+        # determine mo coefficients to rotate
+        if type(mo_coeff) == str:
+            if mo_coeff.lower() in ["occupied","occ","o"]:
+                mask = self.mf.mo_occ >= OCCUPATION_CUTOFF
+                self.moE = self.mf.mo_energy[mask]
+                self.moC = self.mf.mo_coeff[:,mask]
+                
+            elif mo_coeff.lower() in ["virtual","vir","v"]:
+                mask = mf.mo_occ < OCCUPATION_CUTOFF
+                self.moE = self.mf.mo_energy[mask]
+                self.moC = self.mf.mo_coeff[:,mask]
+                
+            else:
+                self.log.error(''' 'mo_coeff' must be either: 
+                               'occupied','occ', or 'o' for occupied orbitals
+                               'virtual','vir', or 'v' for virtual orbitals
+                                or user-specified numpy array. 
+                               ''')
+                sys.exit()
+        else:
+            self.moC = mo_coeff
+            self.moE = np.diag(self.moC.T @ self.mf.get_fock() @ self.moC)
+        
+        
+        # if frozen core approximation is requested for the calculation of
+        # transformed orbitals
+        if frozen_core:
+            if mo_coeff.lower() not in ['o','occ','occupied']:
+                self.log.error('''frozen core only supported for occ orbital transformations''')
+                sys.exit()
+            indx_core = np.arange(0,chemcore(self.mf.mol),dtype=np.int64)
+        else:
+            indx_core = np.arange(0,0,dtype=np.int64)
+        self.moE_core = self.moE[indx_core]
+        self.moC_core = self.moC[:,indx_core]
+        self.moE = np.delete(self.moE,indx_core)
+        self.moC = np.delete(self.moC,indx_core,axis=1)
         pass
         
     def pseudocanonical(self, moE, moC, P):
@@ -463,19 +449,19 @@ class rUnitaryActiveSpace:
         """
         
         # project fock matrix
-        self.calc_projection(debug=debug)
+        self.calc_projection()
         
         # calculate projected MOs
         if self.P_act is not None:
             moE_act,moC_act = self.pseudocanonical(self.moE,self.moC,self.P_act)
             moE_frz,moC_frz = self.pseudocanonical(self.moE,self.moC,self.P_frz)
-            
-            moC = np.hstack([self.moC_cact, moC_act, moC_frz, self.moC_cfrz])
-            moE = np.hstack([self.moE_cact, moE_act, moE_frz, self.moE_cfrz])
-            
+            moC = np.hstack([moC_act, self.moC_core, moC_frz])
+            moE = np.hstack([moE_act, self.moE_core, moE_frz])
             mask_act = np.arange(len(moE)) < self.Norb_act
             
         else:
+            moC = self.moC
+            moE = self.moE
             mask_act = np.array([True]*len(moE))
         
         # reorder by energy (makes analysis easier)
@@ -486,6 +472,7 @@ class rUnitaryActiveSpace:
         
         return moE, moC, mask_act
     
+        
 class rWVFEmbedding:
     """
     Base class for Wavefunction-in-Wavefunction Embedding methods with a 
@@ -518,23 +505,27 @@ class rWVFEmbedding:
             moE_occ, moC_occ, mask_occ_act = self.occ_calc.calc_mo()
             
         else:
-            moE_occ = self.vir_calc.mf.mo_energy[self.vir_calc.mf.mo_occ >= 1]
-            moC_occ = self.vir_calc.mf.mo_coeff[:,self.vir_calc.mf.mo_occ >= 1]
-            mask_occ_act = np.array([True]*self.vir_calc.Nocc)
+            mf = self.vir_calc.mf
+            mask = mf.mo_occ >= OCCUPATION_CUTOFF
+            moE_occ = mf.mo_energy[mask]
+            moC_occ = mf.mo_coeff[:,mask]
+            mask_occ_act = np.array([True]*np.sum(mask))
             
         if self.vir_calc is not None:
             moE_vir, moC_vir, mask_vir_act = self.vir_calc.calc_mo()
             
         else:
-            moE_vir = self.occ_calc.mf.mo_energy[self.occ_calc.mf.mo_occ < 1]
-            moC_vir = self.occ_calc.mf.mo_coeff[:,self.occ_calc.mf.mo_occ < 1]
-            mask_vir_act = np.array([True]*self.occ_calc.Nvir)
+            mf = self.occ_calc.mf
+            mask = mf.mo_occ < OCCUPATION_CUTOFF
+            moE_vir = mf.mo_energy[mask]
+            moC_vir = mf.mo_coeff[:,mask]
+            mask_vir_act = np.array([True]*np.sum(mask))
             
         moE_embed = np.hstack([moE_occ,moE_vir])
         moC_embed = np.hstack([moC_occ,moC_vir])
         
         # set useful masks
-        self.mask_act = np.hstack([mask_occ_act,mask_vir_act])       
+        self.mask_act = np.hstack([mask_occ_act,mask_vir_act])
         self.mask_frz = ~self.mask_act
         
         self.mask_occ_act = np.array([False]*moE_embed.shape[0])

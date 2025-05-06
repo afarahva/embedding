@@ -17,7 +17,7 @@ class PMBoysActiveSpace(rUnitaryActiveSpace):
     
     def __init__(self, mf, frag_inds, mo_occ_type, localizer, 
                  frag_inds_type='atom', cutoff_type="overlap", cutoff=0.1, 
-                 pop_method='meta-lowdin'):
+                 pop_method='meta-lowdin', frozen_core=False):
         """
         Parameters
         ----------
@@ -50,7 +50,7 @@ class PMBoysActiveSpace(rUnitaryActiveSpace):
         pop_method : String
             Pop method for selecting MOs. Default is meta-lowdin.
         """
-        super().__init__(mf,mo_occ_type)
+        super().__init__(mf, mo_coeff=mo_occ_type, frozen_core=frozen_core)
 
         self.localizer = localizer
         self.cutoff = cutoff
@@ -93,7 +93,7 @@ class PMBoysActiveSpace(rUnitaryActiveSpace):
         U = mo_coeff.T @ self.mf.get_ovlp() @ lmo_coeff
         return U
     
-    def calc_projection(self):
+    def calc_projection(self,**kwargs):
         
         # calculate localized MOs
         self.lmo_coeff = self.localizer.kernel()

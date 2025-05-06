@@ -17,8 +17,8 @@ from pyscf_embedding.lib  import rUnitaryActiveSpace, rWVFEmbedding
 # PAO generator
 class rPAO(rUnitaryActiveSpace):
     
-    def __init__(self, mf, frag_inds, mo_occ_type, 
-                 frag_inds_type='atom', cutoff_type="overlap", cutoff=0.1, scutoff=1e-3, **kwargs):
+    def __init__(self, mf, frag_inds, mo_occ_type, frag_inds_type='atom', 
+        cutoff_type="overlap", cutoff=0.1, scutoff=1e-3, frozen_core=False):
         """
         Parameters
         ----------
@@ -48,7 +48,7 @@ class rPAO(rUnitaryActiveSpace):
             'norb' assigns active MOs as those with the higest overlap with 
             the fragment until the cutoff.  d
         """
-        super().__init__(mf,mo_occ_type,**kwargs)
+        super().__init__(mf, mo_coeff=mo_occ_type, frozen_core=frozen_core)
         self.cutoff=cutoff
         self.scutoff = scutoff
         self.cutoff_type = cutoff_type

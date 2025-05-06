@@ -18,11 +18,17 @@ from pyscf_embedding.local.regional import rRegionalActiveSpace
 # AVAS method
 class rAVAS(rWVFEmbedding):
     
-    def __init__(self, mf, frag_inds, frag_inds_type='atom', basis='minao', cutoff=0.1, orth=None):
-        self.occ_calc = rRegionalActiveSpace(mf, frag_inds, 'occupied', frag_inds_type=frag_inds_type, basis=basis, cutoff=cutoff, orth=orth)
-        self.vir_calc = rRegionalActiveSpace(mf, frag_inds, 'virtual', frag_inds_type=frag_inds_type, basis=basis, cutoff=cutoff, orth=orth)
+    def __init__(self, mf, frag_inds, frag_inds_type='atom', basis='minao', cutoff_type="overlap", cutoff=0.1, orth=False, frozen_core=False):
         
-    def kernel(self):
+        self.occ_calc = rRegionalActiveSpace(mf, frag_inds, 'occupied', 
+        frag_inds_type=frag_inds_type, basis=basis, cutoff_type=cutoff_type,
+        cutoff=cutoff, orth=orth, frozen_core=frozen_core)
+        
+        self.vir_calc = rRegionalActiveSpace(mf, frag_inds, 'virtual', 
+        frag_inds_type=frag_inds_type, basis=basis, cutoff=cutoff, 
+        orth=orth, frozen_core=frozen_core)
+        
+    def calc_mo(self):
         
         # occupied space follows same rules as regional embedding
         self.moC_occ,self.moE_occ,self.mask_occ_act = self.occ_calc.calc_mo()
@@ -66,8 +72,8 @@ if __name__ == '__main__':
     basis_vir=mol.basis
     cutoff_occ=0.0
     cutoff_vir=0.1
-    re = rDMET(mf, frag_inds, 'atom', basis='minao', cutoff=0.1)
-    moE_new, moC_new, indx_frz = re.kernel()
+    embed = rDMET(mf, frag_inds, 'atom', basis='minao', cutoff=0.1)
+    moE_new, moC_new, indx_frz = embed.calc_mo()
     print(len(indx_frz))
 
     # embedded

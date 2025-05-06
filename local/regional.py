@@ -12,7 +12,7 @@ import numpy as np
 from pyscf_embedding.lib import rUnitaryActiveSpace, rWVFEmbedding, FC_AO_Ints
 
 
-def FragmentPops(mol, mo_coeff, frag_inds, basis_frag, frag_inds_type="atom",  orth=None):
+def FragmentPops(mol, mo_coeff, frag_inds, basis_frag, frag_inds_type="atom",  orth=False):
     """
     Calculates populations of canonical orbitals of a composite system on a 
     fragment.
@@ -29,8 +29,8 @@ def FragmentPops(mol, mo_coeff, frag_inds, basis_frag, frag_inds_type="atom",  o
 class rRegionalActiveSpace(rUnitaryActiveSpace):
     
     def __init__(self, mf, frag_inds, mo_occ_type, 
-                 frag_inds_type="atom", basis='minao', orth=False,
-                 cutoff_type="overlap", cutoff=0.1, **kwargs):
+        frag_inds_type="atom", basis='minao',
+        cutoff_type="overlap", cutoff=0.1, orth=False, frozen_core=False):
         """
         
         Parameters
@@ -70,14 +70,19 @@ class rRegionalActiveSpace(rUnitaryActiveSpace):
             
         orth : Bool
             Whether to orthogonalization fragment orbitals. Default is False.
+            
+        frozen_core : Bool
+            Whether to freeze all core orbital when generating active space.
         """
-        super().__init__(mf,mo_occ_type,**kwargs)
+        super().__init__(mf, mo_coeff=mo_occ_type, frozen_core=frozen_core)
         self.cutoff=cutoff
         self.cutoff_type = cutoff_type
         self.basis=basis
-        self.fc_ints = FC_AO_Ints(mf.mol, frag_inds, frag_inds_type=frag_inds_type, basis_frag=basis, orth=orth)
+        self.fc_ints = FC_AO_Ints(mf.mol, 
+                                  frag_inds, frag_inds_type=frag_inds_type, 
+                                  basis_frag=basis, orth=orth)
         
-    def calc_projection(self,debug=False):
+    def calc_projection(self, debug=False):
         
         # compute projection operator 
         if self.basis=='iao':
@@ -97,7 +102,7 @@ class rRegionalActiveSpace(rUnitaryActiveSpace):
         if self.cutoff_type.lower() in ['overlap','pop','population']:
             mask_act = s >= self.cutoff
             
-        elif self.cutoff_type.lower() in ['spade']:
+        elif self.cutoff_type.lower() in ['spade', 'auto']:
             ds = s[1:] - s[0:-1]
             indx_max = np.argmax(ds)
             mask_act = np.zeros(len(s), dtype=bool)
@@ -129,7 +134,38 @@ class rRegionalActiveSpace(rUnitaryActiveSpace):
         
         return self.P_act, self.P_frz
 
-rSPADE = rRegionalActiveSpace
+# SPADE is formally equivalent to regional embedding, but as originally 
+# defined by Claudino/Mayhall uses Lowdin orbitals and uses the inflection 
+# point of the sqrt of the occupancies instead of the occupancies themselves.
+class rSPADEActiveSpace(rUnitaryActiveSpace):
+    def __init__(self, mf, frag_inds, mo_occ_type, frozen_core=False):
+        super().__init__(mf, mo_coeff=mo_occ_type, frozen_core=frozen_core)
+        self.frag_inds = frag_inds
+
+    def calc_projection(self, debug=False):
+        from scipy.linalg import fractional_matrix_power
+        
+        frag_ao_inds = np.concatenate([range(p0,p1) for b0,b1,p0,p1 in
+                    self.mf.mol.aoslice_by_atom()[self.frag_inds]]).astype(int)
+        
+        S = self.mf.get_ovlp()
+        S_half = fractional_matrix_power(S, 0.5)
+        orthogonal_orbitals = (S_half @ self.moC)[frag_ao_inds, :]
+        
+        u, s, v = np.linalg.svd(orthogonal_orbitals, full_matrices=True)
+        delta_s = [-(s[i+1] - s[i]) for i in range(len(s) - 1)]
+        
+        n_act_mos = np.argpartition(delta_s, -1)[-1] + 1
+        n_env_mos = len(s) - n_act_mos
+        
+        self.P_act = v.T[:, :n_act_mos]
+        self.P_frz = v.T[:, n_act_mos:]
+        self.Norb_act = n_act_mos
+        
+        if debug:
+            self.s_proj = s
+        
+        return self.P_act, self.P_frz
 
 # standard regional embedding
 class rRegionalEmbedding(rWVFEmbedding):
@@ -140,11 +176,11 @@ class rRegionalEmbedding(rWVFEmbedding):
         
         self.occ_calc = rRegionalActiveSpace(mf, frag_inds, 'occupied', 
             frag_inds_type=frag_inds_type, basis=basis_occ, cutoff=cutoff_occ, 
-            cutoff_type=cutoff_type, orth=orth,frozen_core=frozen_core)
+            cutoff_type=cutoff_type, orth=orth, frozen_core=frozen_core)
         
         self.vir_calc = rRegionalActiveSpace(mf, frag_inds, 'virtual', 
             frag_inds_type=frag_inds_type, basis=basis_vir, cutoff=cutoff_vir, 
-            cutoff_type=cutoff_type, orth=orth,frozen_core=False)
+            cutoff_type=cutoff_type, orth=orth, frozen_core=False)
          
     def kernel(self):
         moE_embed, moC_embed, indx_frz = super().calc_mo()
@@ -185,7 +221,7 @@ if __name__ == '__main__':
     cutoff_vir=0.1
     
     # traditional regional embedding
-    re = rRegionalEmbedding(mf, frag_inds, 'atom', basis_occ, basis_vir, cutoff_occ, cutoff_vir, orth=False, frozen_core=True)
+    re = rRegionalEmbedding(mf, frag_inds, 'atom', basis_occ, basis_vir, cutoff_occ, cutoff_vir, orth=False, frozen_core=False)
     moE_re, moC_new, indx_frz_re = re.kernel()
     mycc = pyscf.cc.CCSD(mf)
     mycc.mo_coeff = moC_new
@@ -193,6 +229,7 @@ if __name__ == '__main__':
     mycc.run()
     print(mycc.e_corr)
     
+    #%%
     # spade embedding
     occ_calc = rRegionalActiveSpace(mf, frag_inds, 'occ', basis='minao', cutoff_type='spade', frozen_core=True)
     vir_calc = rRegionalActiveSpace(mf, frag_inds, 'vir', basis=mol.basis, cutoff_type='spade', frozen_core=False)
@@ -203,30 +240,6 @@ if __name__ == '__main__':
     mycc.frozen = indx_frz_spade
     mycc.run()
     print(mycc.e_corr)
-    
     #%%
-    # compare regional embedding versus spade
-    occ_calc.calc_projection(debug=True)
-    s = occ_calc.s_proj
-    ds = occ_calc.ds_proj
-    mask_act = occ_calc.mask_act
-
-    from matplotlib import pyplot as plt
-    plt.figure()
-    plt.plot(s)
-    plt.plot(ds)
-    plt.plot(mask_act)
     
-    vir_calc.calc_projection(debug=True)
-    s = vir_calc.s_proj
-    ds = vir_calc.ds_proj
-    mask_act = vir_calc.mask_act
-
-    from matplotlib import pyplot as plt
-    plt.figure()
-    plt.plot(s)
-    plt.plot(ds)
-    plt.plot(mask_act)
-
-
     
