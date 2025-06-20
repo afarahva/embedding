@@ -103,8 +103,10 @@ class rRegionalActiveSpace(rUnitaryActiveSpace):
             mask_act = s >= self.cutoff
             
         elif self.cutoff_type.lower() in ['spade', 'auto']:
+            if type(self.cutoff)!=int:
+                raise ValueError("For SPADE, cutoff value must be an int representing the number of additinoal orbitals to include form the inflection point of the population curve")
             ds = s[1:] - s[0:-1]
-            indx_max = np.argmax(ds)
+            indx_max = np.argmax(ds)-self.cutoff
             mask_act = np.zeros(len(s), dtype=bool)
             mask_act[indx_max+1:] = True
             
@@ -115,7 +117,7 @@ class rRegionalActiveSpace(rUnitaryActiveSpace):
         elif self.cutoff_type.lower() in ['norb','norb_act']:
             assert type(self.cutoff)==int
             mask_act = np.zeros(len(s), dtype=bool)
-            mask_act[np.argsort(s)[0:self.cutoff]] = True 
+            mask_act[np.argsort(-s)[0:self.cutoff]] = True 
 
         else:
             raise ValueError("Incorrect cutoff type. Must be one of 'overlap', 'pct_occ' or 'Norb'" )
@@ -129,7 +131,7 @@ class rRegionalActiveSpace(rUnitaryActiveSpace):
         if debug:
             self.P_proj = P_proj
             self.s_proj = s
-            self.ds_proj = ds
+            self.ds_proj = s[1:] - s[0:-1]
             self.mask_act = mask_act
         
         return self.P_act, self.P_frz

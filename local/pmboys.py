@@ -61,6 +61,7 @@ class PMBoysActiveSpace(rUnitaryActiveSpace):
             self.frag_atm_inds = frag_inds
             self.frag_ao_inds = np.concatenate([range(p0,p1) for b0,b1,p0,p1 in
                                       self.mf.mol.aoslice_by_atom()[frag_inds]]).astype(int)
+        
         elif frag_inds_type.lower() == 'orbital':
             self.frag_atm_inds = None
             self.frag_ao_inds = frag_inds
@@ -102,11 +103,25 @@ class PMBoysActiveSpace(rUnitaryActiveSpace):
         if self.cutoff_type.lower() in ['overlap','pop','population']:
             mask_act = self.frag_pop > self.cutoff
             mask_frz = ~mask_act
+            
+        elif self.cutoff_type.lower() in ['spade', 'auto']:
+            if type(self.cutoff)!=int:
+                raise ValueError("For SPADE, cutoff value must be an int representing the number of additinoal orbitals to include form the inflection point of the population curve")
+            s = np.sort(self.frag_pop)
+            ds = s[1:] - s[0:-1]
+            indx_max = np.argmax(ds)-self.cutoff
+            
+            mask_act = np.zeros(len(s), dtype=bool)
+            indx_sort = np.argsort( self.frag_pop )
+            mask_act[indx_sort[indx_max+1:]] = True
+            mask_frz = ~mask_act
+
         elif self.cutoff_type.lower() in ['norb','norb_act']:
             indx_sort = np.flip(np.argsort( self.frag_pop ))
             mask_act = np.zeros(len( self.frag_pop ), dtype=bool)
             mask_act[indx_sort[0:self.cutoff]] = True
             mask_frz = ~mask_act
+            
         else:
             raise ValueError("Incorrect cutoff type. Must be one of 'overlap', or 'norb'" )
         
