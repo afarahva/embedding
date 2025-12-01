@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-pao.py
+cholpao.py
 
 Projected Atomic Orbitals
 
@@ -13,13 +13,76 @@ from pyscf.cc import ccsd
 import numpy as np
 from pyscf import lo
 from pyscf_embedding.lib  import rUnitaryActiveSpace, rWVFEmbedding
-#from scipy.linalg import eigh, eigvalsh
+from pyscf.lib.scipy_helper import pivoted_cholesky
 
-# PAO generator
-class rPAO(rUnitaryActiveSpace):
+def pivoted_cholesky(matrix, pivot_subset, cutoff, cutoff_type):
+    """
+    Performs an Incomplete Pivoted Cholesky Decomposition.
+    
+    Args:
+        matrix: Symmetric matrix to decompose
+        tol: Convergence threshold
+        pivot_subset: List of indices. If provided, the pivot search 
+                      is restricted to these indices. This allows generating
+                      PAOs specifically for a molecular fragment.
+    """
+    matrix = matrix.copy()
+    n = matrix.shape[0]
+    L = np.zeros((n, n))
+    pivots = np.arange(n)
+    
+    # If no subset provided, allow all indices
+    if pivot_subset is None:
+        valid_indices = np.ones(n, dtype=bool)
+    else:
+        valid_indices = np.zeros(n, dtype=bool)
+        valid_indices[pivot_subset] = True
+    
+    rank = 0
+    for k in range(n):            
+        if cutoff_type in ["norb"] and rank >= cutoff:
+            break
+        
+        current_diag = np.diag(matrix)[k:]
+        current_global_indices = pivots[k:]
+        
+        search_values = current_diag.copy()
+        
+
+        for i, val in enumerate(search_values):
+            if not valid_indices[current_global_indices[i]]:
+                search_values[i] = -1.0
+
+        local_best = np.argmax(search_values)
+        local_pivot_idx = local_best + k
+        max_val = matrix[local_pivot_idx, local_pivot_idx]
+
+        if cutoff_type not in ["norb"] and max_val < cutoff:
+            break
+            
+        matrix[[k, local_pivot_idx]] = matrix[[local_pivot_idx, k]]
+        matrix[:, [k, local_pivot_idx]] = matrix[:, [local_pivot_idx, k]]
+        L[[k, local_pivot_idx]] = L[[local_pivot_idx, k]]
+        pivots[[k, local_pivot_idx]] = pivots[[local_pivot_idx, k]]
+        
+        L[k, k] = np.sqrt(max_val)
+        L[k+1:, k] = matrix[k+1:, k] / L[k, k]
+        
+        outer_prod = np.outer(L[k+1:, k], L[k+1:, k])
+        matrix[k+1:, k+1:] -= outer_prod
+        
+        rank += 1
+
+    # Un-permute
+    L_final = np.zeros_like(L)
+    L_final[pivots] = L
+    return L_final[:, :rank]
+
+# Cholesky PAO generator
+class rCholPAO(rUnitaryActiveSpace):
     
     def __init__(self, mf, frag_inds, mo_occ_type, frag_inds_type='atom', 
-        cutoff_type="overlap", cutoff=0.1, scutoff=1e-3):
+        cutoff_type="overlap", cutoff=1e-1):
         """
         Parameters
         ----------
@@ -41,7 +104,7 @@ class rPAO(rUnitaryActiveSpace):
             Cutoff for active orbitals. Default: 0.1
             
         cutoff_type : String
-            Type of cutoff value. One of 'overlap', 'pct_occ', or 'norb'.
+            Type of cutoff value. One of 'overlap', or 'norb'.
             
             'overlap' (default) assigns active MOs as those with a higher
             overlap value than the cutoff specified. 
@@ -51,7 +114,6 @@ class rPAO(rUnitaryActiveSpace):
         """
         super().__init__(mf, mo_coeff=mo_occ_type)
         self.cutoff=cutoff
-        self.scutoff = scutoff
         self.cutoff_type = cutoff_type
         
         if frag_inds_type.lower() == "atom":
@@ -96,27 +158,11 @@ class rPAO(rUnitaryActiveSpace):
         # Construct PAOs in AO basis
         P = self.moC @ self.moC.T
         C_pao = P@S # unnormalized PAOs
+        C_pao_frag = pivoted_cholesky(P, pivot_subset=self.frag_ao_inds, 
+                              cutoff=self.cutoff, cutoff_type=self.cutoff_type)
         
-        # Calculate population of PAOs on fragment atoms and keep only those 
-        # with significant population
-        fpop = np.einsum("ij,ij->j",C_pao[self.frag_ao_inds,:], (S@C_pao)[self.frag_ao_inds,:])
-        
-        if self.cutoff_type.lower() in ['overlap','pop','population']:
-            mask = fpop>self.cutoff
-        elif self.cutoff_type.lower() in ['norb','norb_act']:
-            indx_sort = np.flip(np.argsort(fpop))
-            mask = np.zeros(len(fpop), dtype=bool)
-            mask[indx_sort[0:self.cutoff]] = True 
-        else:
-            raise ValueError("Incorrect cutoff type. Must be one of 'overlap', or 'norb'" )
-            
-        C_pao_frag = C_pao[:,mask]
-        S_pao_frag = C_pao_frag.T @ S @ C_pao_frag
-
-        # Orthonormalize fragment PAOs amongst each other
-        s,v = np.linalg.eigh(S_pao_frag)
-        mask = s > self.scutoff
-        C_pao_active = np.einsum("ab,ia->ib",v[:,mask]/ np.sqrt(s[None,mask]),C_pao_frag)
+        norms = np.sqrt(np.diag(C_pao_frag.T @ S @ C_pao_frag))
+        C_pao_active = C_pao_frag / norms        
         
         # Generate Bath/Frozen PAOs
         C_pao_bath =  C_pao - C_pao_active@C_pao_active.T@S
@@ -174,8 +220,8 @@ if __name__ == '__main__':
     mf = mol.RHF().run()
     #%%
     frag_inds=[0,1]
-    occ_calc = rPAO(mf, frag_inds, 'occ', cutoff_type='norb', cutoff=10)
-    vir_calc = rPAO(mf, frag_inds, 'vir', cutoff=0.1)
+    occ_calc = None
+    vir_calc = rCholPAO(mf, frag_inds, 'vir', cutoff=0.1)
     
     embed = rWVFEmbedding(occ_calc, vir_calc)
     moE_new, moC_new, indx_frz = embed.calc_mo()
