@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-cholpao.py
+cpao.py
 
 Projected Atomic Orbitals
 
@@ -15,40 +15,34 @@ from pyscf import lo
 from pyscf_embedding.lib  import rUnitaryActiveSpace, rWVFEmbedding
 from pyscf.lib.scipy_helper import pivoted_cholesky
 
-def pivoted_cholesky(matrix, pivot_subset, cutoff, cutoff_type):
-    """
-    Performs an Incomplete Pivoted Cholesky Decomposition.
-    
-    Args:
-        matrix: Symmetric matrix to decompose
-        tol: Convergence threshold
-        pivot_subset: List of indices. If provided, the pivot search 
-                      is restricted to these indices. This allows generating
-                      PAOs specifically for a molecular fragment.
-    """
+
+def pc_probe(matrix, pivot_subset=None , max_rank=None):
+    """Runs full Cholesky decomp to record pivot spectrum."""
     matrix = matrix.copy()
     n = matrix.shape[0]
-    L = np.zeros((n, n))
     pivots = np.arange(n)
+    diagonals_history = []
     
-    # If no subset provided, allow all indices
+    # machine tolerance
+    machine_epsilon = np.finfo(np.double).eps
+    tol = n * machine_epsilon * np.amax(np.diag(matrix))
+    print(tol)
+    
+    # Handle pivot subset masking
     if pivot_subset is None:
         valid_indices = np.ones(n, dtype=bool)
     else:
         valid_indices = np.zeros(n, dtype=bool)
         valid_indices[pivot_subset] = True
     
-    rank = 0
-    for k in range(n):            
-        if cutoff_type in ["norb"] and rank >= cutoff:
-            break
-        
+    L = np.zeros((n, n))
+    
+    for k in range(n):
+        # Mask invalid pivots
         current_diag = np.diag(matrix)[k:]
         current_global_indices = pivots[k:]
         
         search_values = current_diag.copy()
-        
-
         for i, val in enumerate(search_values):
             if not valid_indices[current_global_indices[i]]:
                 search_values[i] = -1.0
@@ -57,29 +51,75 @@ def pivoted_cholesky(matrix, pivot_subset, cutoff, cutoff_type):
         local_pivot_idx = local_best + k
         max_val = matrix[local_pivot_idx, local_pivot_idx]
 
-        if cutoff_type not in ["norb"] and max_val < cutoff:
+        # Stop at numerical noise floor
+        if max_val <= tol:
             break
             
+        diagonals_history.append(max_val)
+        
+        # Swap
         matrix[[k, local_pivot_idx]] = matrix[[local_pivot_idx, k]]
         matrix[:, [k, local_pivot_idx]] = matrix[:, [local_pivot_idx, k]]
         L[[k, local_pivot_idx]] = L[[local_pivot_idx, k]]
         pivots[[k, local_pivot_idx]] = pivots[[local_pivot_idx, k]]
         
+        # Update
         L[k, k] = np.sqrt(max_val)
         L[k+1:, k] = matrix[k+1:, k] / L[k, k]
-        
         outer_prod = np.outer(L[k+1:, k], L[k+1:, k])
         matrix[k+1:, k+1:] -= outer_prod
         
-        rank += 1
+    return np.array(diagonals_history), L, pivots
 
-    # Un-permute
-    L_final = np.zeros_like(L)
-    L_final[pivots] = L
-    return L_final[:, :rank]
+def pivoted_cholesky(matrix, pivot_subset=None, cutoff=1e-5, cutoff_type="pop", max_rank=None):
+    """
+    Wrapper to perform Cholesky with various truncation criteria.
+    cutoff_type: 'norb', 'pop', 'cond', 'largest_gap'
+    """
+    diagonals, L_full, pivots = pc_probe(matrix, pivot_subset, max_rank)
+    
+    # Determine Final Rank
+    final_rank = len(diagonals)
+    type_clean = cutoff_type.lower()
+    
+    if type_clean in ["norbital", "norb"]:
+        final_rank = int(cutoff)
+        
+    elif type_clean in ["pop", "population", "overlap"]:
+        # Cutoff is absolute threshold for diagonal value
+        below_thresh = np.where(diagonals < cutoff)[0]
+        if len(below_thresh) > 0:
+            final_rank = below_thresh[0]
+            
+    elif type_clean in ["cond", "cond_number", "condition_number"]:
+        # Cutoff is condition number cap (ratio of eigenvalues)
+        # Threshold = max_pivot / (cond_cap^2)
+        threshold = diagonals[0] * (cutoff**2)
+        below_thresh = np.where(diagonals < threshold)[0]
+        if len(below_thresh) > 0:
+            final_rank = below_thresh[0]
+            
+    elif type_clean in ["gap","largest_gap"]:
+        # Heuristic: largest log drop after initial orbitals
+        if len(diagonals) > 3:
+            log_diag = np.log10(diagonals)
+            start = min(5, len(diagonals)//2)
+            diffs = log_diag[:-1] - log_diag[1:]
+            if len(diffs) > start:
+                final_rank = np.argmax(diffs[start:]) + start + 1
+
+    # Bounds check
+    final_rank = min(final_rank, len(diagonals))
+    
+    # 1. The Localized Set (0 to final_rank)
+    L_frag_perm = L_full[:, :final_rank]
+    L_local = np.zeros_like(L_frag_perm)
+    L_local[pivots] = L_frag_perm
+    
+    return L_local
 
 # Cholesky PAO generator
-class rCholPAO(rUnitaryActiveSpace):
+class rCPAO(rUnitaryActiveSpace):
     
     def __init__(self, mf, frag_inds, mo_occ_type, frag_inds_type='atom', 
         cutoff_type="overlap", cutoff=1e-1):
@@ -157,15 +197,17 @@ class rCholPAO(rUnitaryActiveSpace):
         
         # Construct PAOs in AO basis
         P = self.moC @ self.moC.T
-        C_pao = P@S # unnormalized PAOs
-        C_pao_frag = pivoted_cholesky(P, pivot_subset=self.frag_ao_inds, 
-                              cutoff=self.cutoff, cutoff_type=self.cutoff_type)
+        
+        C_pao_frag = pivoted_cholesky(P, 
+                              pivot_subset=self.frag_ao_inds, 
+                              cutoff=self.cutoff, cutoff_type=self.cutoff_type,
+                              max_rank=self.moC.shape[1])
         
         norms = np.sqrt(np.diag(C_pao_frag.T @ S @ C_pao_frag))
-        C_pao_active = C_pao_frag / norms        
+        C_pao_active = C_pao_frag / norms       
         
-        # Generate Bath/Frozen PAOs
-        C_pao_bath =  C_pao - C_pao_active@C_pao_active.T@S
+        # create bath/environment orbitals
+        C_pao_bath =  P@S - C_pao_active@C_pao_active.T@S
         S_pao_bath = C_pao_bath.T @ S @ C_pao_bath
         s,v = np.linalg.eigh(S_pao_bath)
         
@@ -173,12 +215,15 @@ class rCholPAO(rUnitaryActiveSpace):
         delmo = self.moC.shape[1] - C_pao_active.shape[1]
         if delmo > 0:
             mask[-delmo:] = True
-        C_pao_frozen = np.einsum("ab,ia->ib",v[:,mask]/ np.sqrt(s[None,mask]),C_pao_bath)
+        C_pao_frozen = np.einsum("ab,ia->ib",v[:,mask]/ np.sqrt(s[None,mask])
+                                 ,C_pao_bath)
         
         # Concatenate active and frozen PAOs
         C_final = np.hstack([C_pao_active,C_pao_frozen])
         self.C_pao_active = C_pao_active
-            
+        
+        print(self.moC.shape, C_pao_active.shape, C_pao_frozen.shape)
+        
         # unitary transformation from MOs to PAOs
         u = self.moC.T @ self.mf.get_ovlp() @ C_final
         
@@ -219,9 +264,9 @@ if __name__ == '__main__':
     mol = pyscf.M(atom=coords,basis='ccpvdz',verbose=3)
     mf = mol.RHF().run()
     #%%
-    frag_inds=[0,1]
+    frag_inds=[0,1,2]
     occ_calc = None
-    vir_calc = rCholPAO(mf, frag_inds, 'vir', cutoff=0.1)
+    vir_calc = rCPAO(mf, frag_inds, 'vir', cutoff=1e-1, cutoff_type="gap")
     
     embed = rWVFEmbedding(occ_calc, vir_calc)
     moE_new, moC_new, indx_frz = embed.calc_mo()

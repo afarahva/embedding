@@ -137,8 +137,8 @@ class rRegionalActiveSpace(rUnitaryActiveSpace):
         return self.P_act, self.P_frz
 
 # SPADE is formally equivalent to regional embedding, but as originally 
-# defined by Claudino/Mayhall uses Lowdin orbitals and uses the inflection 
-# point of the sqrt of the occupancies instead of the occupancies themselves.
+# defined by Claudino & Mayhall always projects into the full atomic orbital 
+# basis instead of only using a minao basis
 class rSPADEActiveSpace(rUnitaryActiveSpace):
     def __init__(self, mf, frag_inds, mo_occ_type, frozen_core=False):
         super().__init__(mf, mo_coeff=mo_occ_type, frozen_core=frozen_core)
