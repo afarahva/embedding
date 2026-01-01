@@ -4,35 +4,20 @@
 regional.py
 
 Regional Embedding and Regional Active Space / SPADE code
+Generalized for Restricted and Unrestricted references.
 
 author: Ardavan Farahvash, github.com/afarahva
-"""    
+"""     
 
 import numpy as np
-from pyscf_embedding.lib import rUnitaryActiveSpace, rWVFEmbedding, FC_AO_Ints
+from pyscf_embedding.utils import ActiveSpace, HFEmbedding, FC_AO_Ints
 
-
-def FragmentPops(mol, mo_coeff, frag_inds, basis_frag, frag_inds_type="atom",  orth=False):
-    """
-    Calculates populations of canonical orbitals of a composite system on a 
-    fragment.
-    """
-    AO_ints = FC_AO_Ints(mol)
-    ovlp_ff, ovlp_fc = FC_AO_Ints.calc_ovlp(frag_inds, frag_inds_type, basis_frag=basis_frag, orth=orth)
-    pop = AO_ints.population(ovlp_ff, ovlp_fc, mo_coeff)
-    
-    return pop
-
-# regional embedding active space projector (either occupied or virtual)
-# this version works for any spin-restricted system, but only single k-point
-# periodic calculations are supported. 
-class rRegionalActiveSpace(rUnitaryActiveSpace):
+class RegionalActiveSpace(ActiveSpace):
     
     def __init__(self, mf, frag_inds, mo_occ_type, 
         frag_inds_type="atom", basis='minao',
         cutoff_type="overlap", cutoff=0.1, orth=False, frozen_core=False):
         """
-        
         Parameters
         ----------
         mf : PySCF Mean Field object
@@ -75,120 +60,200 @@ class rRegionalActiveSpace(rUnitaryActiveSpace):
             Whether to freeze all core orbital when generating active space.
         """
         super().__init__(mf, mo_coeff=mo_occ_type, frozen_core=frozen_core)
-        self.cutoff=cutoff
+        self.cutoff = cutoff
         self.cutoff_type = cutoff_type
-        self.basis=basis
+        self.basis = basis
         self.fc_ints = FC_AO_Ints(mf.mol, 
                                   frag_inds, frag_inds_type=frag_inds_type, 
                                   basis_frag=basis, orth=orth)
         
-    def calc_projection(self, debug=False):
-        
-        # compute projection operator 
-        if self.basis=='iao':
-            ovlp_ff, ovlp_fc = self.fc_ints.calc_ao_ovlp(moC_occ=self.moC)
-        else:
-            ovlp_ff, ovlp_fc = self.fc_ints.calc_ao_ovlp()
-
-        ovlp_f_mo = ovlp_fc @ self.moC
-        
-        P_proj = ovlp_f_mo.conj().T @ np.linalg.inv(ovlp_ff) @ ovlp_f_mo
-        
-        # diagonalize 
-        s,u = np.linalg.eigh(P_proj)
-        s[s < 0] = 0
-        
-        # select indices of active orbitals
+    def _get_active_mask(self, s):
+        """
+        Helper method to determine active mask based on singular values s
+        """
         if self.cutoff_type.lower() in ['overlap','pop','population']:
             mask_act = s >= self.cutoff
             
         elif self.cutoff_type.lower() in ['spade', 'auto']:
-            if type(self.cutoff)!=int:
-                raise ValueError("For SPADE, cutoff value must be an int representing the number of additinoal orbitals to include form the inflection point of the population curve")
+            if not isinstance(self.cutoff, int):
+                raise ValueError("For SPADE, cutoff value must be an int representing the number of additional orbitals to include form the inflection point of the population curve")
+            
+            # Simple derivative check for inflection
             ds = s[1:] - s[0:-1]
-            indx_max = np.argmax(ds)-self.cutoff
+            if len(ds) == 0:
+                indx_max = 0
+            else:
+                indx_max = np.argmax(ds)
+            
+            # Apply offset
+            indx_cut = indx_max - self.cutoff
             mask_act = np.zeros(len(s), dtype=bool)
-            mask_act[indx_max+1:] = True
+            mask_act[indx_cut+1:] = True
             
         elif self.cutoff_type.lower() in ['pct_occ','occ']:
-            cumsum = np.cumsum(s[::-1]/np.sum(s))[::-1]
-            mask_act = cumsum < self.cutoff
+            # Sort descending for accumulation
+            s_sorted = np.sort(s)[::-1]
+            cumsum = np.cumsum(s_sorted / np.sum(s_sorted))
+            
+            # Check how many orbitals needed to hit cutoff
+            n_needed = np.searchsorted(cumsum, self.cutoff) + 1
+            
+            # Map back to original indices (s is usually ascending from eigh)
+            # We select the N largest values
+            mask_act = np.zeros(len(s), dtype=bool)
+            # Indices of largest N elements
+            top_inds = np.argsort(s)[-n_needed:]
+            mask_act[top_inds] = True
             
         elif self.cutoff_type.lower() in ['norb','norb_act']:
-            assert type(self.cutoff)==int
+            assert isinstance(self.cutoff, int)
             mask_act = np.zeros(len(s), dtype=bool)
-            mask_act[np.argsort(-s)[0:self.cutoff]] = True 
+            # Select largest N elements
+            top_inds = np.argsort(s)[-self.cutoff:]
+            mask_act[top_inds] = True
 
         else:
             raise ValueError("Incorrect cutoff type. Must be one of 'overlap', 'pct_occ' or 'Norb'" )
+            
+        return mask_act
+
+    def _project_one_spin(self, moC, s_ff, s_fc):
+        """
+        Performs projection and diagonalization for a single spin channel.
+        """
+        ovlp_f_mo = s_fc @ moC
+        
+        # P = (S_fi C)^T S_ff^-1 (S_fi C)
+        P_proj = ovlp_f_mo.conj().T @ np.linalg.inv(s_ff) @ ovlp_f_mo
+        
+        # diagonalize 
+        s, u = np.linalg.eigh(P_proj)
+        s[s < 0] = 0
+        
+        # select indices of active orbitals
+        mask_act = self._get_active_mask(s)
         
         # construct unitary projector 
-        self.P_act = u[:,mask_act]
-        self.P_frz = u[:,~mask_act]
-        self.Norb_act = np.sum(mask_act)
+        P_act = u[:, mask_act]
+        P_frz = u[:, ~mask_act]
+        norb_act = np.sum(mask_act)
         
-        # set more object attributes if debugger is called
-        if debug:
-            self.P_proj = P_proj
-            self.s_proj = s
-            self.ds_proj = s[1:] - s[0:-1]
-            self.mask_act = mask_act
-        
-        return self.P_act, self.P_frz
-
-# SPADE is formally equivalent to regional embedding, but as originally 
-# defined by Claudino & Mayhall always projects into the full atomic orbital 
-# basis instead of only using a minao basis
-class rSPADEActiveSpace(rUnitaryActiveSpace):
-    def __init__(self, mf, frag_inds, mo_occ_type, frozen_core=False):
-        super().__init__(mf, mo_coeff=mo_occ_type, frozen_core=frozen_core)
-        self.frag_inds = frag_inds
+        return P_act, P_frz, norb_act, s
 
     def calc_projection(self, debug=False):
-        from scipy.linalg import fractional_matrix_power
         
-        frag_ao_inds = np.concatenate([range(p0,p1) for b0,b1,p0,p1 in
-                    self.mf.mol.aoslice_by_atom()[self.frag_inds]]).astype(int)
-        
-        S = self.mf.get_ovlp()
-        S_half = fractional_matrix_power(S, 0.5)
-        orthogonal_orbitals = (S_half @ self.moC)[frag_ao_inds, :]
-        
-        u, s, v = np.linalg.svd(orthogonal_orbitals, full_matrices=True)
-        delta_s = [-(s[i+1] - s[i]) for i in range(len(s) - 1)]
-        
-        n_act_mos = np.argpartition(delta_s, -1)[-1] + 1
-        n_env_mos = len(s) - n_act_mos
-        
-        self.P_act = v.T[:, :n_act_mos]
-        self.P_frz = v.T[:, n_act_mos:]
-        self.Norb_act = n_act_mos
-        
-        if debug:
-            self.s_proj = s
+        # compute projection operator 
+        # Note: self.fc_ints should handle tuple return for IAO if moC is tuple
+        if self.basis == 'iao':
+            ovlp_ff, ovlp_fc = self.fc_ints.calc_ao_ovlp(moC_occ=self.moC)
+        else:
+            ovlp_ff, ovlp_fc = self.fc_ints.calc_ao_ovlp()
+
+        if self.is_uhf:
+            # Handle Unrestricted References
+            # Note: For standard bases (minao), ovlp_ff/fc are single matrices (geometry only).
+            # For IAO, they might be tuples if spin-dependent.
+            
+            # Helper to handle polymorphism of overlap matrices
+            get_ovlp = lambda obj, idx: obj[idx] if isinstance(obj, (tuple, list)) else obj
+            
+            P_act_a, P_frz_a, norb_a, s_a = self._project_one_spin(
+                self.moC[0], get_ovlp(ovlp_ff, 0), get_ovlp(ovlp_fc, 0)
+            )
+            P_act_b, P_frz_b, norb_b, s_b = self._project_one_spin(
+                self.moC[1], get_ovlp(ovlp_ff, 1), get_ovlp(ovlp_fc, 1)
+            )
+            
+            self.P_act = (P_act_a, P_act_b)
+            self.P_frz = (P_frz_a, P_frz_b)
+            self.Norb_act = (norb_a, norb_b)
+            
+            if debug:
+                self.s_proj = (s_a, s_b)
+                self.ds_proj = (s_a[1:] - s_a[:-1], s_b[1:] - s_b[:-1])
+                # Masks are re-calculated in _project_one_spin, not stored here directly
+                # but can be inferred from Norb_act if needed.
+                
+        else:
+            # Handle Restricted References
+            P_act, P_frz, norb, s = self._project_one_spin(self.moC, ovlp_ff, ovlp_fc)
+            
+            self.P_act = P_act
+            self.P_frz = P_frz
+            self.Norb_act = norb
+            
+            if debug:
+                self.P_proj = None # P_proj is transient in the helper
+                self.s_proj = s
+                self.ds_proj = s[1:] - s[0:-1]
         
         return self.P_act, self.P_frz
 
-# standard regional embedding
-class rRegionalEmbedding(rWVFEmbedding):
+
+# Standard Regional Embedding
+class RegionalEmbedding(HFEmbedding):
     
     def __init__(self, mf, frag_inds, frag_inds_type='atom', basis_occ='minao', 
-                 basis_vir=None, cutoff_occ=0.1, cutoff_vir=0.1, 
-                 cutoff_type='overlap', orth=None, frozen_core=False):
+                 basis_vir=None, cutoff_occ=0.1, cutoff_vir=0.1,
+                 orth=None, frozen_core=False):
         
-        self.occ_calc = rRegionalActiveSpace(mf, frag_inds, 'occupied', 
+        occ_calc = RegionalActiveSpace(mf, frag_inds, 'occupied', 
             frag_inds_type=frag_inds_type, basis=basis_occ, cutoff=cutoff_occ, 
-            cutoff_type=cutoff_type, orth=orth, frozen_core=frozen_core)
+            cutoff_type="overlap", orth=orth, frozen_core=frozen_core)
         
-        self.vir_calc = rRegionalActiveSpace(mf, frag_inds, 'virtual', 
+        vir_calc = RegionalActiveSpace(mf, frag_inds, 'virtual', 
             frag_inds_type=frag_inds_type, basis=basis_vir, cutoff=cutoff_vir, 
-            cutoff_type=cutoff_type, orth=orth, frozen_core=False)
+            cutoff_type="overlap", orth=orth, frozen_core=False)
+        
+        super().__init__(occ_calc, vir_calc)
          
     def kernel(self):
         moE_embed, moC_embed, indx_frz = super().calc_mo()
         return moE_embed, moC_embed, indx_frz
+    
+# Automated Valence Active Space Method
+class AVAS(HFEmbedding):
+    
+    def __init__(self, mf, frag_inds, frag_inds_type='atom', min_basis='minao', 
+                 cutoff_occ=0.1, cutoff_vir=0.1, orth=None, frozen_core=False):
         
-
+        occ_calc = RegionalActiveSpace(mf, frag_inds, 'occupied', 
+            frag_inds_type=frag_inds_type, basis=min_basis, cutoff=cutoff_occ, 
+            cutoff_type="overlap", orth=orth, frozen_core=frozen_core)
+        
+        vir_calc = RegionalActiveSpace(mf, frag_inds, 'virtual', 
+            frag_inds_type=frag_inds_type, basis=min_basis, cutoff=cutoff_vir, 
+            cutoff_type="overlap", orth=orth, frozen_core=False)
+        
+        super().__init__(occ_calc, vir_calc)
+         
+    def calc_mo(self):
+        moE_embed, moC_embed, indx_frz = super().calc_mo()
+        return moE_embed, moC_embed, indx_frz     
+    
+# Subsystem Projected Atomic DEcomposition
+class SPADE(HFEmbedding):
+    
+    def __init__(self, mf, frag_inds, frag_inds_type='atom', cutoff=0,
+                 orth=None, frozen_core=False):
+        
+        basis = mf.mol.basis
+        
+        occ_calc = RegionalActiveSpace(mf, frag_inds, 'occupied', 
+            frag_inds_type=frag_inds_type, basis=basis, 
+            cutoff=0, cutoff_type='spade',
+            orth=orth, frozen_core=frozen_core)
+        
+        vir_calc = RegionalActiveSpace(mf, frag_inds, 'virtual', 
+            frag_inds_type=frag_inds_type, basis=basis, 
+            cutoff=0, cutoff_type='spade',
+            orth=orth, frozen_core=frozen_core)
+        
+        super().__init__(occ_calc, vir_calc)
+         
+    def kernel(self):
+        moE_embed, moC_embed, indx_frz = super().calc_mo()
+        return moE_embed, moC_embed, indx_frz            
 
 #%%
 if __name__ == '__main__':
@@ -211,9 +276,9 @@ if __name__ == '__main__':
     H         -1.85763       -2.04579       -0.23330
     """
     
-    mol = pyscf.M(atom=coords,basis='ccpvdz',verbose=4)
+    mol = pyscf.M(atom=coords,basis='ccpvdz',spin=0,verbose=4)
     mol.build()
-    mf = mol.RHF().run()
+    mf = mol.UHF().run()
     
     # calculate localized orbital energies/coefficients
     frag_inds=[0,1]
@@ -223,7 +288,7 @@ if __name__ == '__main__':
     cutoff_vir=0.1
     
     # traditional regional embedding
-    re = rRegionalEmbedding(mf, frag_inds, 'atom', basis_occ, basis_vir, cutoff_occ, cutoff_vir, orth=False, frozen_core=False)
+    re = RegionalEmbedding(mf, frag_inds, 'atom', basis_occ, basis_vir, cutoff_occ, cutoff_vir, orth=False, frozen_core=False)
     moE_re, moC_new, indx_frz_re = re.kernel()
     mycc = pyscf.cc.CCSD(mf)
     mycc.mo_coeff = moC_new
@@ -233,15 +298,15 @@ if __name__ == '__main__':
     
     #%%
     # spade embedding
-    occ_calc = rRegionalActiveSpace(mf, frag_inds, 'occ', basis='minao', cutoff_type='spade', frozen_core=True)
-    vir_calc = rRegionalActiveSpace(mf, frag_inds, 'vir', basis=mol.basis, cutoff_type='spade', frozen_core=False)
-    embed = rWVFEmbedding(occ_calc, vir_calc)
-    moE_spade, moC_new, indx_frz_spade = embed.calc_mo()
+    # occ_calc = rRegionalActiveSpace(mf, frag_inds, 'occ', basis='minao', cutoff_type='spade', frozen_core=True)
+    # vir_calc = rRegionalActiveSpace(mf, frag_inds, 'vir', basis=mol.basis, cutoff_type='spade', frozen_core=False)
+    # embed = WVFEmbedding(occ_calc, vir_calc)
+    # moE_spade, moC_new, indx_frz_spade = embed.calc_mo()
     
-    mycc.mo_coeff = moC_new
-    mycc.frozen = indx_frz_spade
-    mycc.run()
-    print(mycc.e_corr)
+    # mycc.mo_coeff = moC_new
+    # mycc.frozen = indx_frz_spade
+    # mycc.run()
+    # print(mycc.e_corr)
     #%%
     
     

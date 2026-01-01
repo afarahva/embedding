@@ -115,7 +115,8 @@ class PAO(ActiveSpace):
         else:
             raise ValueError("Incorrect cutoff type. Must be one of 'overlap', or 'norb'" )
             
-        C_pao_frag = C_pao[:, mask]
+        # C_pao_frag = C_pao[:, mask]
+        C_pao_frag = P@S[:,self.frag_ao_inds]
         S_pao_frag = C_pao_frag.T @ S @ C_pao_frag
 
         # Orthonormalize fragment PAOs amongst each other

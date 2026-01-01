@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-pmboys.py
+lmo.py
 
 Pipek-Mezey / Boys MO localization
 
@@ -9,11 +9,12 @@ author: Ardavan Farahvash, github.com/afarahva
 """
 
 import numpy as np
-from pyscf_embedding.lib import rUnitaryActiveSpace, rWVFEmbedding
+from pyscf_embedding.utils import ActiveSpace, HFEmbedding
 from pyscf import lo
 
-# regional embedding active space projector (either occupied or virtual)
-class PMBoysActiveSpace(rUnitaryActiveSpace):
+# active-space projector based on 
+# Pipek-Mezey/Foster-Boys/Edmiston-Ruedenberg LMOs
+class LMOActiveSpace(ActiveSpace):
     
     def __init__(self, mf, frag_inds, mo_occ_type, localizer, 
                  frag_inds_type='atom', cutoff_type="overlap", cutoff=0.1, 
@@ -107,6 +108,7 @@ class PMBoysActiveSpace(rUnitaryActiveSpace):
         elif self.cutoff_type.lower() in ['spade', 'auto']:
             if type(self.cutoff)!=int:
                 raise ValueError("For SPADE, cutoff value must be an int representing the number of additinoal orbitals to include form the inflection point of the population curve")
+            
             s = np.sort(self.frag_pop)
             ds = s[1:] - s[0:-1]
             indx_max = np.argmax(ds)-self.cutoff
@@ -123,12 +125,12 @@ class PMBoysActiveSpace(rUnitaryActiveSpace):
             mask_frz = ~mask_act
             
         else:
-            raise ValueError("Incorrect cutoff type. Must be one of 'overlap', or 'norb'" )
+            raise ValueError("Incorrect cutoff type. Must be one of 'overlap' or 'norb'" )
         
-        # Unitary transformation matrix
+        # Unitary matrix
         self.u = self.unitary_mo_to_lmo(self.moC, self.lmo_coeff)
         
-        # Unitary projection operators
+        # Unitary projectors
         self.P_act = self.u[:,mask_act]
         self.P_frz = self.u[:,mask_frz]
         self.Norb_act = np.sum(mask_act)
@@ -159,19 +161,20 @@ if __name__ == '__main__':
     mol = pyscf.M(atom=coords,basis='ccpvdz',verbose=3)
     mf = mol.RHF().run()
     
-    ##### boys
+    #%%
+    ##### Boys
     frag_inds=[0,1]
     loc1 = lo.Boys(mol, mf.mo_coeff[:,mf.mo_occ > 0])
     loc1.max_stepsize=0.005
     loc1.init_guess='cholesky'
-    occ_calc = PMBoysActiveSpace(mf, frag_inds, 'occ', loc1, cutoff=0.01)
+    occ_calc = LMOActiveSpace(mf, frag_inds, 'occ', loc1, cutoff=0.01)
     
     loc2 = lo.Boys(mol, mf.mo_coeff[:,mf.mo_occ == 0])
     loc2.max_stepsize=0.005
     loc2.init_guess='cholesky'
-    vir_calc = PMBoysActiveSpace(mf, frag_inds, 'vir', loc2, cutoff=0.01)
+    vir_calc = LMOActiveSpace(mf, frag_inds, 'vir', loc2, cutoff=0.01)
     
-    embed = rWVFEmbedding(occ_calc,vir_calc)
+    embed = HFEmbedding(occ_calc,vir_calc)
     moE_new, moC_new, indx_frz = embed.calc_mo()
     print(len(indx_frz))
     
@@ -180,9 +183,6 @@ if __name__ == '__main__':
     mycc.mo_coeff = moC_new
     mycc.frozen = indx_frz
     mycc.run()
-    
-    cubegen.orbital(mol,"./boys_homo.cube", moC_new[:,embed.mask_occ_act][:,-1])
-    cubegen.orbital(mol,"./boys_lumo.cube", moC_new[:,embed.mask_vir_act][:,0])
     
     #%%
     ##### PM
@@ -190,14 +190,14 @@ if __name__ == '__main__':
     loc1 = lo.PipekMezey(mol, mf.mo_coeff[:,mf.mo_occ > 0])
     loc1.max_stepsize=0.005
     loc1.init_guess='cholesky'
-    occ_calc = PMBoysActiveSpace(mf, frag_inds, 'occ', loc1, cutoff_type='norb', cutoff=10)
+    occ_calc = LMOActiveSpace(mf, frag_inds, 'occ', loc1, cutoff_type='norb', cutoff=10)
     
     loc2 = lo.PipekMezey(mol, mf.mo_coeff[:,mf.mo_occ == 0])
     loc2.max_stepsize=0.005
     loc2.init_guess='cholesky'
-    vir_calc = PMBoysActiveSpace(mf, frag_inds, 'vir', loc2, cutoff_type='norb', cutoff=20)
+    vir_calc = LMOActiveSpace(mf, frag_inds, 'vir', loc2, cutoff_type='norb', cutoff=20)
     
-    embed = rWVFEmbedding(occ_calc,vir_calc)
+    embed = HFEmbedding(occ_calc,vir_calc)
     moE_new, moC_new, indx_frz = embed.calc_mo()
     print(len(indx_frz))
     
@@ -206,8 +206,5 @@ if __name__ == '__main__':
     mycc.mo_coeff = moC_new
     mycc.frozen = indx_frz
     mycc.run()
-    
-    # cubegen.orbital(mol,"./pm_homo.cube", moC_new[:,embed.mask_occ_act][:,-1])
-    # cubegen.orbital(mol,"./pm_lumo.cube", moC_new[:,embed.mask_vir_act][:,0])
 
     

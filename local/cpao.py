@@ -3,18 +3,15 @@
 """
 cpao.py
 
-Projected Atomic Orbitals
+Projected Atomic Orbitals via Cholesky Decomposition
+Generalized for Restricted and Unrestricted references.
 
 author: Ardavan Farahvash, github.com/afarahva
 """
 
-from pyscf.cc import ccsd
-
 import numpy as np
 from pyscf import lo
-from pyscf_embedding.lib  import rUnitaryActiveSpace, rWVFEmbedding
-from pyscf.lib.scipy_helper import pivoted_cholesky
-
+from pyscf_embedding.utils import ActiveSpace, HFEmbedding
 
 def pc_probe(matrix, pivot_subset=None , max_rank=None):
     """Runs full Cholesky decomp to record pivot spectrum."""
@@ -26,7 +23,7 @@ def pc_probe(matrix, pivot_subset=None , max_rank=None):
     # machine tolerance
     machine_epsilon = np.finfo(np.double).eps
     tol = n * machine_epsilon * np.amax(np.diag(matrix))
-    print(tol)
+    # print(tol)
     
     # Handle pivot subset masking
     if pivot_subset is None:
@@ -84,12 +81,6 @@ def pivoted_cholesky(matrix, pivot_subset=None, cutoff=1e-5, cutoff_type="pop", 
     
     if type_clean in ["norbital", "norb"]:
         final_rank = int(cutoff)
-        
-    elif type_clean in ["pop", "population", "overlap"]:
-        # Cutoff is absolute threshold for diagonal value
-        below_thresh = np.where(diagonals < cutoff)[0]
-        if len(below_thresh) > 0:
-            final_rank = below_thresh[0]
             
     elif type_clean in ["cond", "cond_number", "condition_number"]:
         # Cutoff is condition number cap (ratio of eigenvalues)
@@ -98,15 +89,6 @@ def pivoted_cholesky(matrix, pivot_subset=None, cutoff=1e-5, cutoff_type="pop", 
         below_thresh = np.where(diagonals < threshold)[0]
         if len(below_thresh) > 0:
             final_rank = below_thresh[0]
-            
-    elif type_clean in ["gap","largest_gap"]:
-        # Heuristic: largest log drop after initial orbitals
-        if len(diagonals) > 3:
-            log_diag = np.log10(diagonals)
-            start = min(5, len(diagonals)//2)
-            diffs = log_diag[:-1] - log_diag[1:]
-            if len(diffs) > start:
-                final_rank = np.argmax(diffs[start:]) + start + 1
 
     # Bounds check
     final_rank = min(final_rank, len(diagonals))
@@ -119,10 +101,10 @@ def pivoted_cholesky(matrix, pivot_subset=None, cutoff=1e-5, cutoff_type="pop", 
     return L_local
 
 # Cholesky PAO generator
-class rCPAO(rUnitaryActiveSpace):
+class CPAO(ActiveSpace):
     
     def __init__(self, mf, frag_inds, mo_occ_type, frag_inds_type='atom', 
-        cutoff_type="overlap", cutoff=1e-1):
+        cutoff_type="cond", cutoff=1e-1):
         """
         Parameters
         ----------
@@ -137,8 +119,6 @@ class rCPAO(rUnitaryActiveSpace):
         frag_inds_type : String.
             Specify 'orbital' if supplying a list of orbital indices in 
             frag_inds instead of atom indices
-        basis : String.
-            Fragment basis set for occupied orbitals. Default: 'minao'
             
         cutoff : Float or Int
             Cutoff for active orbitals. Default: 0.1
@@ -146,20 +126,21 @@ class rCPAO(rUnitaryActiveSpace):
         cutoff_type : String
             Type of cutoff value. One of 'overlap', or 'norb'.
             
-            'overlap' (default) assigns active MOs as those with a higher
-            overlap value than the cutoff specified. 
+            'cond' (default) assigns active MOs as those with a higher
+            condition number value than the cutoff specified. 
             
             'norb' assigns active MOs as those with the higest overlap with 
-            the fragment until the cutoff.  d
+            the fragment until the cutoff. 
         """
         super().__init__(mf, mo_coeff=mo_occ_type)
-        self.cutoff=cutoff
+        self.cutoff = cutoff
         self.cutoff_type = cutoff_type
         
         if frag_inds_type.lower() == "atom":
             self.frag_atm_inds = frag_inds
+            # Geometric indices are spin-independent
             self.frag_ao_inds = np.concatenate([range(p0,p1) for b0,b1,p0,p1 in
-                                      self.mf.mol.aoslice_by_atom()[frag_inds]]).astype(int)
+                                    self.mf.mol.aoslice_by_atom()[frag_inds]]).astype(int)
         
         elif frag_inds_type.lower() == 'orbital':
             self.frag_atm_inds = None
@@ -170,14 +151,22 @@ class rCPAO(rUnitaryActiveSpace):
             
     def population(self, mo_coeff, method='meta-lowdin'):
         
+        # Handle Unrestricted input
+        if isinstance(mo_coeff, (list, tuple)):
+            return (self.population(mo_coeff[0], method), self.population(mo_coeff[1], method))
+        
         # set population method
         if method=='mulliken':
             mo = mo_coeff
             s = self.mf.get_ovlp()
+            if isinstance(s, (list, tuple)): s = s[0]
         else:
             C = lo.orth_ao(self.mf.mol, method)
-            mo = C.T @ self.mf.get_ovlp() @ mo_coeff
-            s = C.T @ self.mf.get_ovlp() @ C
+            s_mat = self.mf.get_ovlp()
+            if isinstance(s_mat, (list, tuple)): s_mat = s_mat[0]
+            
+            mo = C.T @ s_mat @ mo_coeff
+            s = C.T @ s_mat @ C
             
         # calculate the total population on fragment AOs
         fpops = []
@@ -189,53 +178,83 @@ class rCPAO(rUnitaryActiveSpace):
         fpops = np.array(fpops)
         return fpops
         
-    def calc_projection(self,debug=False):
-        
-        S = self.mf.get_ovlp()
-        
-        ### Generate active PAOs
-        
+    def _project_one_spin(self, moC, S):
+        """
+        Helper function to generate CPAOs for a single spin channel.
+        """
         # Construct PAOs in AO basis
-        P = self.moC @ self.moC.T
+        # P = density matrix of the subspace
+        P = moC @ moC.T
         
+        # Perform Pivoted Cholesky on Density Matrix restricting pivots to fragment
         C_pao_frag = pivoted_cholesky(P, 
                               pivot_subset=self.frag_ao_inds, 
                               cutoff=self.cutoff, cutoff_type=self.cutoff_type,
-                              max_rank=self.moC.shape[1])
+                              max_rank=moC.shape[1])
         
+        # Normalize
+        # Note: pivoted_cholesky returns L such that P ~ L L^T
+        # We project into metric S to normalize properly
         norms = np.sqrt(np.diag(C_pao_frag.T @ S @ C_pao_frag))
-        C_pao_active = C_pao_frag / norms       
         
-        # create bath/environment orbitals
-        C_pao_bath =  P@S - C_pao_active@C_pao_active.T@S
+        # Avoid division by zero if norm is extremely small (though PC shouldn't return those usually)
+        norms[norms < 1e-12] = 1.0 
+        C_pao_active = C_pao_frag / norms        
+        
+        # Create bath/environment orbitals
+        # Project out the active PAOs from the original subspace
+        # C_bath = P S - C_act C_act^T S = (P - C_act C_act^T) S
+        C_pao_bath =  P @ S - C_pao_active @ C_pao_active.T @ S
         S_pao_bath = C_pao_bath.T @ S @ C_pao_bath
-        s,v = np.linalg.eigh(S_pao_bath)
         
-        mask = np.array( [False] * (len(s)))
-        delmo = self.moC.shape[1] - C_pao_active.shape[1]
+        s, v = np.linalg.eigh(S_pao_bath)
+        
+        # Identify non-null bath vectors
+        mask_bath = np.array([False] * (len(s)))
+        delmo = moC.shape[1] - C_pao_active.shape[1]
+        
         if delmo > 0:
-            mask[-delmo:] = True
-        C_pao_frozen = np.einsum("ab,ia->ib",v[:,mask]/ np.sqrt(s[None,mask])
-                                 ,C_pao_bath)
+            mask_bath[-delmo:] = True
+            
+        C_pao_frozen = np.einsum("ab,ia->ib", v[:, mask_bath] / np.sqrt(s[None, mask_bath]), C_pao_bath)
         
         # Concatenate active and frozen PAOs
-        C_final = np.hstack([C_pao_active,C_pao_frozen])
-        self.C_pao_active = C_pao_active
+        C_final = np.hstack([C_pao_active, C_pao_frozen])
         
-        print(self.moC.shape, C_pao_active.shape, C_pao_frozen.shape)
+        # Unitary transformation from MOs to PAOs
+        # u describes rotation of canonical MOs
+        u = moC.T @ S @ C_final
         
-        # unitary transformation from MOs to PAOs
-        u = self.moC.T @ self.mf.get_ovlp() @ C_final
+        norb_act = C_pao_active.shape[1]
+        P_act = u[:, 0:norb_act]
+        P_frz = u[:, norb_act:]
         
-        self.Norb_act = C_pao_active.shape[1]
-        self.P_act = u[:,0:self.Norb_act]
-        self.P_frz = u[:,self.Norb_act:]
+        return P_act, P_frz, norb_act
+
+    def calc_projection(self, debug=False):
+        
+        S = self.mf.get_ovlp()
+        if isinstance(S, (list, tuple)) or (isinstance(S, np.ndarray) and S.ndim==3):
+            if len(S.shape)==3: S = S[0]
+
+        if self.is_uhf:
+            # Unrestricted: Project Alpha and Beta separately
+            P_act_a, P_frz_a, norb_a = self._project_one_spin(self.moC[0], S)
+            P_act_b, P_frz_b, norb_b = self._project_one_spin(self.moC[1], S)
+            self.P_act = (P_act_a, P_act_b)
+            self.P_frz = (P_frz_a, P_frz_b)
+            self.Norb_act = (norb_a, norb_b)
+            
+        else:
+            # Restricted
+            P_act, P_frz, norb = self._project_one_spin(self.moC, S)
+            
+            self.P_act = P_act
+            self.P_frz = P_frz
+            self.Norb_act = norb
         
         if debug:
-            self.C_pao_frag=C_pao_frag
-            self.C_pao_active=C_pao_active
-            self.C_pao_bath=C_pao_bath
-            self.C_pao_frozen=C_pao_frozen
+            pass
         
         return self.P_act, self.P_frz
     
@@ -243,6 +262,7 @@ class rCPAO(rUnitaryActiveSpace):
 
 if __name__ == '__main__':
     import pyscf
+    from pyscf import cc
     
     coords = \
     """
@@ -263,17 +283,32 @@ if __name__ == '__main__':
     
     mol = pyscf.M(atom=coords,basis='ccpvdz',verbose=3)
     mf = mol.RHF().run()
-    #%%
+    
+    print("\n--- RHF CPAO Embedding ---")
     frag_inds=[0,1,2]
     occ_calc = None
-    vir_calc = rCPAO(mf, frag_inds, 'vir', cutoff=1e-1, cutoff_type="gap")
+    vir_calc = CPAO(mf, frag_inds, 'vir', cutoff=1e-3, cutoff_type="cond")
     
-    embed = rWVFEmbedding(occ_calc, vir_calc)
+    embed = HFEmbedding(occ_calc, vir_calc)
     moE_new, moC_new, indx_frz = embed.calc_mo()
-    print(len(indx_frz))
+    print(f"Frozen Orbitals: {len(indx_frz)}")
     
-    # embedded
-    mycc = pyscf.cc.CCSD(mf)
+    mycc = cc.CCSD(mf)
     mycc.mo_coeff = moC_new
     mycc.frozen = indx_frz
     mycc.run()
+    
+    print("\n--- UHF CPAO Embedding ---")
+    mol_u = pyscf.M(atom=coords,basis='ccpvdz', spin=0, verbose=3)
+    mf_u = mol_u.UHF().run()
+    
+    vir_calc_u = CPAO(mf_u, frag_inds, 'vir', cutoff=1e-3, cutoff_type="cond")
+    embed_u = HFEmbedding(None, vir_calc_u)
+    
+    moE_u, moC_u, indx_frz_u = embed_u.calc_mo()
+    print(f"Frozen Alpha: {len(indx_frz_u[0])}, Frozen Beta: {len(indx_frz_u[1])}")
+    
+    mycc_u = cc.UCCSD(mf_u)
+    mycc_u.mo_coeff = moC_u
+    mycc_u.frozen = indx_frz_u
+    mycc_u.run()
