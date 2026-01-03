@@ -44,7 +44,7 @@ class RegionalActiveSpace(ActiveSpace):
             'overlap' (default) assigns active MOs as those with a higher
             overlap value than the cutoff specified. 
             
-            'spade' assigns active MOs based on the spade approach, using the
+            'auto' assigns active MOs based on the spade approach, using the
             inflection point of the occupancy curve.
             
             'pct_occ' assigns active MOs as those with the higest overlap with 
@@ -76,7 +76,9 @@ class RegionalActiveSpace(ActiveSpace):
             
         elif self.cutoff_type.lower() in ['spade', 'auto']:
             if not isinstance(self.cutoff, int):
-                raise ValueError("For SPADE, cutoff value must be an int representing the number of additional orbitals to include form the inflection point of the population curve")
+                self.cutoff=0
+                from warnings import warn
+                warn("For spade/auto, cutoff value must be an int representing the number of additional orbitals to include form the inflection point of the population curve")
             
             # Simple derivative check for inflection
             ds = s[1:] - s[0:-1]
@@ -188,6 +190,72 @@ class RegionalActiveSpace(ActiveSpace):
                 self.ds_proj = s[1:] - s[0:-1]
         
         return self.P_act, self.P_frz
+    
+# Subsystem Projected Atomic DEcomposition
+class SPADEActiveSpace(ActiveSpace):
+    def __init__(self, mf, frag_inds, mo_occ_type, frozen_core=False):
+        super().__init__(mf, mo_coeff=mo_occ_type, frozen_core=frozen_core)
+        self.frag_inds = frag_inds
+
+    def _spade_one_spin(self, moC, S_half, frag_ao_inds):
+        # Project MOs onto orthogonalized AOs
+        # orthogonal_orbitals (N_frag_ao, N_mo)
+        orthogonal_orbitals = (S_half @ moC)[frag_ao_inds, :]
+        
+        # SVD
+        u, s, vh = np.linalg.svd(orthogonal_orbitals, full_matrices=True)
+        
+        # Determine gap
+        if len(s) > 1:
+            delta_s = [-(s[i+1] - s[i]) for i in range(len(s) - 1)]
+            # Find index of largest gap
+            n_act_mos = np.argpartition(delta_s, -1)[-1] + 1
+        else:
+            n_act_mos = len(s)
+
+        P_act = vh.T[:, :n_act_mos]
+        P_frz = vh.T[:, n_act_mos:]
+        
+        return P_act, P_frz, n_act_mos, s
+
+    def calc_projection(self, debug=False):
+        from scipy.linalg import fractional_matrix_power
+        
+        # 1. Identify Fragment Indices
+        frag_ao_inds = np.concatenate([range(p0,p1) for b0,b1,p0,p1 in
+                    self.mf.mol.aoslice_by_atom()[self.frag_inds]]).astype(int)
+        
+        # 2. Prepare Overlap Matrix
+        S = self.mf.get_ovlp()
+        if isinstance(S, (list, tuple)) or (isinstance(S, np.ndarray) and S.ndim == 3):
+            # Handle cases where S might be [S_a, S_b] or k-points (take Gamma)
+            S = S[0]
+            
+        S_half = fractional_matrix_power(S, 0.5)
+        
+        # 3. Calculate Projection
+        if self.is_uhf:
+            P_act_a, P_frz_a, norb_a, s_a = self._spade_one_spin(self.moC[0], S_half, frag_ao_inds)
+            P_act_b, P_frz_b, norb_b, s_b = self._spade_one_spin(self.moC[1], S_half, frag_ao_inds)
+            
+            self.P_act = (P_act_a, P_act_b)
+            self.P_frz = (P_frz_a, P_frz_b)
+            self.Norb_act = (norb_a, norb_b)
+            
+            if debug:
+                self.s_proj = (s_a, s_b)
+                
+        else:
+            P_act, P_frz, norb, s = self._spade_one_spin(self.moC, S_half, frag_ao_inds)
+            
+            self.P_act = P_act
+            self.P_frz = P_frz
+            self.Norb_act = norb
+            
+            if debug:
+                self.s_proj = s
+        
+        return self.P_act, self.P_frz
 
 
 # Standard Regional Embedding
@@ -231,29 +299,22 @@ class AVAS(HFEmbedding):
         moE_embed, moC_embed, indx_frz = super().calc_mo()
         return moE_embed, moC_embed, indx_frz     
     
-# Subsystem Projected Atomic DEcomposition
+# # Subsystem Projected Atomic DEcomposition
 class SPADE(HFEmbedding):
     
-    def __init__(self, mf, frag_inds, frag_inds_type='atom', cutoff=0,
-                 orth=None, frozen_core=False):
+    def __init__(self, mf, frag_inds, frozen_core=False):
+                
+        occ_calc = SPADEActiveSpace(mf, frag_inds, 'occupied',
+                                    frozen_core=frozen_core)
         
-        basis = mf.mol.basis
-        
-        occ_calc = RegionalActiveSpace(mf, frag_inds, 'occupied', 
-            frag_inds_type=frag_inds_type, basis=basis, 
-            cutoff=0, cutoff_type='spade',
-            orth=orth, frozen_core=frozen_core)
-        
-        vir_calc = RegionalActiveSpace(mf, frag_inds, 'virtual', 
-            frag_inds_type=frag_inds_type, basis=basis, 
-            cutoff=0, cutoff_type='spade',
-            orth=orth, frozen_core=frozen_core)
+        vir_calc = SPADEActiveSpace(mf, frag_inds, 'virtual', 
+                                    frozen_core=False)
         
         super().__init__(occ_calc, vir_calc)
          
     def kernel(self):
         moE_embed, moC_embed, indx_frz = super().calc_mo()
-        return moE_embed, moC_embed, indx_frz            
+        return moE_embed, moC_embed, indx_frz      
 
 #%%
 if __name__ == '__main__':
