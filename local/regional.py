@@ -193,25 +193,49 @@ class RegionalActiveSpace(ActiveSpace):
     
 # Subsystem Projected Atomic DEcomposition
 class SPADEActiveSpace(ActiveSpace):
-    def __init__(self, mf, frag_inds, mo_occ_type, frozen_core=False):
+    def __init__(self, mf, frag_inds, mo_occ_type, 
+                 cutoff_type="spade", cutoff=0, frozen_core=False):
+        
         super().__init__(mf, mo_coeff=mo_occ_type, frozen_core=frozen_core)
         self.frag_inds = frag_inds
+        self.cutoff = cutoff
+        self.cutoff_type = cutoff_type
+        
+    def _get_nact(self, s):
+        """
+        Helper method to determine active mask based on singular values s
+        """
+        if self.cutoff_type.lower() in ['overlap','pop','population']:
+            n_act_mos = np.sum(s >= self.cutoff)
+            
+        elif self.cutoff_type.lower() in ['spade', 'auto']:
+            if not isinstance(self.cutoff, int):
+                self.cutoff=0
+                from warnings import warn
+                warn("For spade/auto, cutoff value must be an int representing the number of additional orbitals to include form the inflection point of the population curve")
+            if len(s) > 1:
+                delta_s = [-(s[i+1] - s[i]) for i in range(len(s) - 1)]
+                n_act_mos = np.argpartition(delta_s, -1)[-1] + 1
+            else:
+                n_act_mos = len(s)
+            
+        elif self.cutoff_type.lower() in ['norb','norb_act']:
+            n_act_mos = self.cutoff
 
+        else:
+            raise ValueError("Incorrect cutoff type. Must be one of 'overlap', 'spade' or 'norb'" )
+            
+        return n_act_mos
+    
     def _spade_one_spin(self, moC, S_half, frag_ao_inds):
         # Project MOs onto orthogonalized AOs
         # orthogonal_orbitals (N_frag_ao, N_mo)
         orthogonal_orbitals = (S_half @ moC)[frag_ao_inds, :]
         
-        # SVD
+        # SVD, u:naoxnao, s:nao, vh:nmoxnmo
         u, s, vh = np.linalg.svd(orthogonal_orbitals, full_matrices=True)
         
-        # Determine gap
-        if len(s) > 1:
-            delta_s = [-(s[i+1] - s[i]) for i in range(len(s) - 1)]
-            # Find index of largest gap
-            n_act_mos = np.argpartition(delta_s, -1)[-1] + 1
-        else:
-            n_act_mos = len(s)
+        n_act_mos = self._get_nact(s)
 
         P_act = vh.T[:, :n_act_mos]
         P_frz = vh.T[:, n_act_mos:]
@@ -257,7 +281,6 @@ class SPADEActiveSpace(ActiveSpace):
         
         return self.P_act, self.P_frz
 
-
 # Standard Regional Embedding
 class RegionalEmbedding(HFEmbedding):
     
@@ -268,10 +291,13 @@ class RegionalEmbedding(HFEmbedding):
         occ_calc = RegionalActiveSpace(mf, frag_inds, 'occupied', 
             frag_inds_type=frag_inds_type, basis=basis_occ, cutoff=cutoff_occ, 
             cutoff_type="overlap", orth=orth, frozen_core=frozen_core)
+    
+        occ_calc.calc_mo()
         
         vir_calc = RegionalActiveSpace(mf, frag_inds, 'virtual', 
-            frag_inds_type=frag_inds_type, basis=basis_vir, cutoff=cutoff_vir, 
-            cutoff_type="overlap", orth=orth, frozen_core=False)
+            frag_inds_type=frag_inds_type, basis=basis_vir, 
+            cutoff=occ_calc.Norb_act, cutoff_type="norb", 
+            orth=orth, frozen_core=False)
         
         super().__init__(occ_calc, vir_calc)
          
@@ -339,7 +365,7 @@ if __name__ == '__main__':
     
     mol = pyscf.M(atom=coords,basis='ccpvdz',spin=0,verbose=4)
     mol.build()
-    mf = mol.UHF().run()
+    mf = mol.RHF().run()
     
     # calculate localized orbital energies/coefficients
     frag_inds=[0,1]
@@ -359,15 +385,15 @@ if __name__ == '__main__':
     
     #%%
     # spade embedding
-    # occ_calc = rRegionalActiveSpace(mf, frag_inds, 'occ', basis='minao', cutoff_type='spade', frozen_core=True)
-    # vir_calc = rRegionalActiveSpace(mf, frag_inds, 'vir', basis=mol.basis, cutoff_type='spade', frozen_core=False)
-    # embed = WVFEmbedding(occ_calc, vir_calc)
-    # moE_spade, moC_new, indx_frz_spade = embed.calc_mo()
+    occ_calc = SPADEActiveSpace(mf, frag_inds, 'occ')
+    vir_calc = SPADEActiveSpace(mf, frag_inds, 'vir')
+    embed = HFEmbedding(occ_calc, vir_calc)
+    moE_spade, moC_new, indx_frz_spade = embed.calc_mo()
     
-    # mycc.mo_coeff = moC_new
-    # mycc.frozen = indx_frz_spade
-    # mycc.run()
-    # print(mycc.e_corr)
+    mycc.mo_coeff = moC_new
+    mycc.frozen = indx_frz_spade
+    mycc.run()
+    print(mycc.e_corr)
     #%%
     
     
