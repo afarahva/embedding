@@ -291,13 +291,10 @@ class RegionalEmbedding(HFEmbedding):
         occ_calc = RegionalActiveSpace(mf, frag_inds, 'occupied', 
             frag_inds_type=frag_inds_type, basis=basis_occ, cutoff=cutoff_occ, 
             cutoff_type="overlap", orth=orth, frozen_core=frozen_core)
-    
-        occ_calc.calc_mo()
         
         vir_calc = RegionalActiveSpace(mf, frag_inds, 'virtual', 
-            frag_inds_type=frag_inds_type, basis=basis_vir, 
-            cutoff=occ_calc.Norb_act, cutoff_type="norb", 
-            orth=orth, frozen_core=False)
+            frag_inds_type=frag_inds_type, basis=basis_vir, cutoff=cutoff_vir, 
+            cutoff_type="overlap", orth=orth, frozen_core=frozen_core)
         
         super().__init__(occ_calc, vir_calc)
          
@@ -309,21 +306,24 @@ class RegionalEmbedding(HFEmbedding):
 class AVAS(HFEmbedding):
     
     def __init__(self, mf, frag_inds, frag_inds_type='atom', min_basis='minao', 
-                 cutoff_occ=0.1, cutoff_vir=0.1, orth=None, frozen_core=False):
+                 cutoff=0.1, orth=None, frozen_core=False):
         
         occ_calc = RegionalActiveSpace(mf, frag_inds, 'occupied', 
-            frag_inds_type=frag_inds_type, basis=min_basis, cutoff=cutoff_occ, 
+            frag_inds_type=frag_inds_type, basis=min_basis, cutoff=cutoff, 
             cutoff_type="overlap", orth=orth, frozen_core=frozen_core)
         
+        occ_calc.calc_mo()
+        
         vir_calc = RegionalActiveSpace(mf, frag_inds, 'virtual', 
-            frag_inds_type=frag_inds_type, basis=min_basis, cutoff=cutoff_vir, 
-            cutoff_type="overlap", orth=orth, frozen_core=False)
+            frag_inds_type=frag_inds_type, basis=min_basis, 
+            cutoff=occ_calc.Norb_act, cutoff_type="norb", 
+            orth=orth, frozen_core=False)
         
         super().__init__(occ_calc, vir_calc)
          
     def calc_mo(self):
         moE_embed, moC_embed, indx_frz = super().calc_mo()
-        return moE_embed, moC_embed, indx_frz     
+        return moE_embed, moC_embed, indx_frz
     
 # # Subsystem Projected Atomic DEcomposition
 class SPADE(HFEmbedding):
