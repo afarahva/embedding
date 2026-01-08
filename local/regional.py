@@ -316,7 +316,7 @@ class AVAS(HFEmbedding):
         
         vir_calc = RegionalActiveSpace(mf, frag_inds, 'virtual', 
             frag_inds_type=frag_inds_type, basis=min_basis, 
-            cutoff=occ_calc.Norb_act, cutoff_type="norb", 
+            cutoff=int(occ_calc.Norb_act), cutoff_type="norb", 
             orth=orth, frozen_core=False)
         
         super().__init__(occ_calc, vir_calc)
