@@ -62,44 +62,26 @@ class LMOActiveSpace(ActiveSpace):
         
         if frag_inds_type.lower() == "atom":
             self.frag_atm_inds = frag_inds
-            # Geometric indices are spin independent
             self.frag_ao_inds = np.concatenate([range(p0,p1) for b0,b1,p0,p1 in
-                                    self.mf.mol.aoslice_by_atom()[frag_inds]]).astype(int)
+                        self.mf.mol.aoslice_by_atom()[frag_inds]]).astype(int)
         
-        elif frag_inds_type.lower() == 'orbital':
-            self.frag_atm_inds = None
-            self.frag_ao_inds = frag_inds
+
         else:
-            raise ValueError("frag_inds_type must be either 'atom' or 'orbital'")
+            raise ValueError("frag_inds_type only supports 'atom' for LMO active space")
 
     
     def population(self, mo_coeff, method='meta-lowdin'):
         
         # Handle Unrestricted (recursive)
         if isinstance(mo_coeff, (list, tuple)):
-            return (self.population(mo_coeff[0], method), self.population(mo_coeff[1], method))
+            return (self.population(mo_coeff[0], method), 
+                    self.population(mo_coeff[1], method))
 
-        # set population method
-        if method=='mulliken':
-            mo = mo_coeff
-            s = self.mf.get_ovlp()
-            if isinstance(s, (list, tuple)): s = s[0]
-        else:
-            C = lo.orth_ao(self.mf.mol, method)
-            s_mat = self.mf.get_ovlp()
-            if isinstance(s_mat, (list, tuple)): s_mat = s_mat[0]
-            
-            mo = C.T @ s_mat @ mo_coeff
-            s = C.T @ s_mat @ C
-            
-        # calculate the total population on fragment AOs
-        fpops = []
-        for i in range(mo.shape[1]):
-            pops_i = np.diag(np.outer(mo[:,i],mo[:,i]) @ s)
-            fpops_i = np.sum(pops_i[self.frag_ao_inds])
-            fpops.append(fpops_i)
-            
-        fpops = np.array(fpops)
+        projR = lo.pipek.atomic_pops(self.mf.mol, mo_coeff, 
+                               method=method, mf=self.mf, s=self.mf.get_ovlp())
+        pop = np.einsum('xii->xi', projR)
+        fpops = np.sum(pop[self.frag_atm_inds],axis=0)
+        
         return fpops
     
     def unitary_mo_to_lmo(self, mo_coeff, lmo_coeff):
@@ -243,8 +225,8 @@ if __name__ == '__main__':
     loc_occ = lo.Boys(mol, mf.mo_coeff[:, mf.mo_occ > 0])
     loc_vir = lo.Boys(mol, mf.mo_coeff[:, mf.mo_occ == 0])
     
-    occ_calc = LMOActiveSpace(mf, frag_inds, 'occ', loc_occ, cutoff=0.01)
-    vir_calc = LMOActiveSpace(mf, frag_inds, 'vir', loc_vir, cutoff=0.01)
+    occ_calc = LMOActiveSpace(mf, frag_inds, 'occ', loc_occ, cutoff=0.01, pop_method='lowdin')
+    vir_calc = LMOActiveSpace(mf, frag_inds, 'vir', loc_vir, cutoff=0.01, pop_method='lowdin')
     
     embed = HFEmbedding(occ_calc, vir_calc)
     moE_new, moC_new, indx_frz = embed.calc_mo()

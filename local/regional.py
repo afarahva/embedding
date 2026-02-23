@@ -173,11 +173,8 @@ class RegionalActiveSpace(ActiveSpace):
             if debug:
                 self.s_proj = (s_a, s_b)
                 self.ds_proj = (s_a[1:] - s_a[:-1], s_b[1:] - s_b[:-1])
-                # Masks are re-calculated in _project_one_spin, not stored here directly
-                # but can be inferred from Norb_act if needed.
                 
         else:
-            # Handle Restricted References
             P_act, P_frz, norb, s = self._project_one_spin(self.moC, ovlp_ff, ovlp_fc)
             
             self.P_act = P_act

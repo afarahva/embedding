@@ -377,9 +377,7 @@ class ActiveSpace:
         Handles both Restricted (returns arrays) and Unrestricted (returns tuples).
         """
         
-        # project fock matrix (Should set self.P_act)
-        # If UHF, child class must set P_act to (P_act_a, P_act_b)
-        self.calc_projection()
+        self.calc_projection(debug=debug)
         
         if self.is_uhf:
             # Unrestricted Logic: Process Alpha and Beta separately

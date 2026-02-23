@@ -101,21 +101,7 @@ class PAO(ActiveSpace):
         P = moC @ moC.T
         C_pao = P @ S # unnormalized PAOs
         
-        # Calculate population of PAOs on fragment atoms and keep only those 
-        # with significant population
-        # fpop[j] = <pao_j | P_frag | pao_j> roughly
-        fpop = np.einsum("ij,ij->j", C_pao[self.frag_ao_inds,:], (S @ C_pao)[self.frag_ao_inds,:])
-        
-        if self.cutoff_type.lower() in ['overlap','pop','population']:
-            mask = fpop > self.cutoff
-        elif self.cutoff_type.lower() in ['norb','norb_act']:
-            indx_sort = np.flip(np.argsort(fpop))
-            mask = np.zeros(len(fpop), dtype=bool)
-            mask[indx_sort[0:self.cutoff]] = True 
-        else:
-            raise ValueError("Incorrect cutoff type. Must be one of 'overlap', or 'norb'" )
             
-        # C_pao_frag = C_pao[:, mask]
         C_pao_frag = P@S[:,self.frag_ao_inds]
         S_pao_frag = C_pao_frag.T @ S @ C_pao_frag
 
@@ -214,7 +200,7 @@ if __name__ == '__main__':
     print("\n--- RHF PAO Embedding ---")
     frag_inds=[0,1]
     occ_calc = None
-    vir_calc = PAO(mf, frag_inds, 'vir', cutoff=0.1)
+    vir_calc = PAO(mf, frag_inds, 'vir', cutoff=1e-4)
     
     embed = HFEmbedding(occ_calc, vir_calc)
     moE_new, moC_new, indx_frz = embed.calc_mo()
@@ -231,7 +217,7 @@ if __name__ == '__main__':
     mf_u = mol_u.UHF().run()
     
     # Use same logic for UHF
-    vir_calc_u = PAO(mf_u, frag_inds, 'vir', cutoff=0.1)
+    vir_calc_u = PAO(mf_u, frag_inds, 'vir', cutoff=1e-4)
     embed_u = HFEmbedding(None, vir_calc_u)
     
     moE_u, moC_u, indx_frz_u = embed_u.calc_mo()

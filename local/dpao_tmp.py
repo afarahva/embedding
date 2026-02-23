@@ -93,72 +93,67 @@ class PAO(ActiveSpace):
         return fpops
         
     def _project_one_spin(self, moC, S):
-        """
-        Helper function to generate PAOs for a single spin channel.
-        """
-        # Construct PAOs in AO basis
-        # P is the density matrix of the space (occ or vir) being projected
-        P = moC @ moC.T
-        C_pao = P @ S # unnormalized PAOs
-        # Calculate population of PAOs on fragment atoms and keep only those 
-        # with significant population
-
-        # NOTE: Kallay paper has the wrong formula...
-        # fpop = np.einsum("ij,ij->j", C_pao[self.frag_ao_inds,:], (S @ C_pao)[self.frag_ao_inds,:])
-        # fpop = np.einsum("ij,ij->i", C_pao[:,self.frag_ao_inds], (S @ C_pao)[:,self.frag_ao_inds])
-        fpop = np.diag( C_pao[self.frag_ao_inds,:].T @ S[np.ix_(self.frag_ao_inds,self.frag_ao_inds)] @ C_pao[self.frag_ao_inds,:])
-        
-
-        if self.cutoff_type.lower() in ['overlap','pop','population']:
-            mask = fpop > self.cutoff
-        elif self.cutoff_type.lower() in ['norb','norb_act']:
-            indx_sort = np.flip(np.argsort(fpop))
-            mask = np.zeros(len(fpop), dtype=bool)
-            mask[indx_sort[0:self.cutoff]] = True 
-        else:
-            raise ValueError("Incorrect cutoff type. Must be one of 'overlap', or 'norb'" )
+            """
+            Helper function for Occupied Löwdin Projection.
+            """
+            # 1. Get the Löwdin transformation matrix (S^-1/2)
+            s_eigval, s_eigvec = np.linalg.eigh(S)
+            s_inv_half = s_eigvec @ np.diag(1.0/np.sqrt(s_eigval)) @ s_eigvec.T
+            s_half = s_eigvec @ np.diag(np.sqrt(s_eigval)) @ s_eigvec.T
+    
+            # 2. Transform MOs to the Löwdin basis: C_lowdin = S^1/2 @ C_ao
+            # This is because C_ao is defined such that Phi_MO = Chi_ao @ C_ao
+            # To get Phi_MO = Phi_lowdin @ C_lowdin, we need C_lowdin = S^1/2 @ C_ao
+            mo_lowdin = s_half @ moC
+    
+            # 3. Construct the Projector in the Löwdin basis
+            # Since the basis is orthonormal, P = C @ C^T
+            P_lowdin = mo_lowdin @ mo_lowdin.T
+    
+            # 4. Occupied Löwdin Projection:
+            # Just take the columns of P corresponding to the fragment indices.
+            # This projects the unit vectors (Löwdin AOs) onto the MO space.
+            C_pao_frag = P_lowdin[:, self.frag_ao_inds]
             
-        C_pao_frag = C_pao[:, mask]
-        S_pao_frag = C_pao_frag.T @ S @ C_pao_frag
-
-        # Orthonormalize fragment PAOs amongst each other
-        s, v = np.linalg.eigh(S_pao_frag)
-        # Filter out linearly dependent PAOs
-        mask_s = s > self.scutoff
-        C_pao_active = np.einsum("ab,ia->ib", v[:, mask_s] / np.sqrt(s[None, mask_s]), C_pao_frag)
-        
-        # Generate Bath/Frozen PAOs (Project out active PAOs from original space)
-        # C_bath = C_orig - C_act C_act^T S C_orig ?? 
-        # Original code: C_pao_bath =  C_pao - C_pao_active@C_pao_active.T@S
-        # Note: This logic assumes C_pao spans the whole space initially. 
-        # C_pao was P@S. 
-        C_pao_bath = C_pao - C_pao_active @ C_pao_active.T @ S
-        S_pao_bath = C_pao_bath.T @ S @ C_pao_bath
-        
-        s_bath, v_bath = np.linalg.eigh(S_pao_bath)
-        
-        # Identify non-null bath vectors
-        # We expect exactly (N_total - N_active) non-zero eigenvalues
-        mask_bath = np.array([False] * len(s_bath))
-        delmo = moC.shape[1] - C_pao_active.shape[1]
-        
-        if delmo > 0:
-            mask_bath[-delmo:] = True
+            # In this orthonormal basis, the overlap of projected orbitals is:
+            S_pao_frag = C_pao_frag.T @ C_pao_frag
+    
+            # 5. Orthonormalize the active fragment PAOs
+            s, v = np.linalg.eigh(S_pao_frag)
             
-        C_pao_frozen = np.einsum("ab,ia->ib", v_bath[:, mask_bath] / np.sqrt(s_bath[None, mask_bath]), C_pao_bath)
-        
-        # Concatenate active and frozen PAOs
-        C_final = np.hstack([C_pao_active, C_pao_frozen])
+            # Masking logic (e.g., taking the top N orbitals)
+            mask_s = np.zeros(len(s), dtype=bool)
+            if self.cutoff_type == "norb":
+                n_to_keep = min(int(self.cutoff), len(s))
+                mask_s[-n_to_keep:] = True
+            else:
+                mask_s = s > self.cutoff
+    
+            C_pao_active = np.einsum("ab,ia->ib", v[:, mask_s] / np.sqrt(s[None, mask_s]), C_pao_frag)
+    
+            # 6. Bath Construction (Project out active from the full MO space in Lowdin basis)
+            # Full space in Lowdin basis is spanned by P_lowdin
+            C_pao_bath = P_lowdin - C_pao_active @ C_pao_active.T 
+            S_pao_bath = C_pao_bath.T @ C_pao_bath
             
-        # Unitary transformation from MOs to PAOs
-        # u describes how to rotate Canonical MOs (moC) to get PAOs (C_final)
-        u = moC.T @ S @ C_final
-        
-        norb_act = C_pao_active.shape[1]
-        P_act = u[:, 0:norb_act]
-        P_frz = u[:, norb_act:]
-        
-        return P_act, P_frz, norb_act
+            s_bath, v_bath = np.linalg.eigh(S_pao_bath)
+            delmo = moC.shape[1] - C_pao_active.shape[1]
+            mask_bath = np.zeros(len(s_bath), dtype=bool)
+            if delmo > 0:
+                mask_bath[-delmo:] = True
+                
+            C_pao_frozen = np.einsum("ab,ia->ib", v_bath[:, mask_bath] / np.sqrt(s_bath[None, mask_bath]), C_pao_bath)
+            
+            # 7. Finalize: Combine and rotate back to AO basis
+            C_final_lowdin = np.hstack([C_pao_active, C_pao_frozen])
+            # C_ao = S^-1/2 @ C_lowdin
+            C_final_ao = s_inv_half @ C_final_lowdin
+            
+            # Unitary rotation matrix (U) such that C_final_ao = moC @ U
+            u = moC.T @ S @ C_final_ao
+            
+            norb_act = C_pao_active.shape[1]
+            return u[:, :norb_act], u[:, norb_act:], norb_act
 
     def calc_projection(self, debug=False):
         
@@ -216,7 +211,7 @@ if __name__ == '__main__':
     print("\n--- RHF PAO Embedding ---")
     frag_inds=[0,1]
     occ_calc = None
-    vir_calc = PAO(mf, frag_inds, 'vir', cutoff=0.1)
+    vir_calc = PAO(mf, frag_inds, 'vir', cutoff=19, cutoff_type = "norb")
     
     embed = HFEmbedding(occ_calc, vir_calc)
     moE_new, moC_new, indx_frz = embed.calc_mo()
@@ -227,19 +222,21 @@ if __name__ == '__main__':
     mycc.mo_coeff = moC_new
     mycc.frozen = indx_frz
     mycc.run()
+    #%%
+    from pyscf_embedding.local import regional as re
+    N_vir_active_PAO = embed.vir_calc.Norb_act
     
-    print("\n--- UHF PAO Embedding ---")
-    mol_u = pyscf.M(atom=coords,basis='ccpvdz', spin=0, verbose=3)
-    mf_u = mol_u.UHF().run()
+    print("\n--- RHF RE Embedding ---")
+    frag_inds=[0,1]
+    occ_calc = None
+    vir_calc = re.RegionalActiveSpace(mf, frag_inds, 'vir', cutoff=19, cutoff_type="norb", orth=True)
     
-    # Use same logic for UHF
-    vir_calc_u = PAO(mf_u, frag_inds, 'vir', cutoff=0.1)
-    embed_u = HFEmbedding(None, vir_calc_u)
+    embed = HFEmbedding(occ_calc, vir_calc)
+    moE_new, moC_new, indx_frz = embed.calc_mo()
+    print(f"Number of frozen orbitals: {len(indx_frz)}")
     
-    moE_u, moC_u, indx_frz_u = embed_u.calc_mo()
-    print(f"Frozen Alpha: {len(indx_frz_u[0])}, Frozen Beta: {len(indx_frz_u[1])}")
-    
-    mycc_u = cc.UCCSD(mf_u)
-    mycc_u.mo_coeff = moC_u
-    mycc_u.frozen = indx_frz_u
-    mycc_u.run()
+    # embedded
+    mycc = cc.CCSD(mf)
+    mycc.mo_coeff = moC_new
+    mycc.frozen = indx_frz
+    mycc.run()
