@@ -9,14 +9,15 @@ Generalized for Restricted and Unrestricted references.
 author: Ardavan Farahvash, github.com/afarahva
 """
 import numpy as np
+from scipy.linalg import eigh
 from pyscf import lo
-from pyscf_embedding.utils import ActiveSpace, HFEmbedding
+from pyscf_embedding.utils import ActiveSpace, HFEmbedding, FC_AO_Ints
 
 # PAO generator
 class PAO(ActiveSpace):
     
     def __init__(self, mf, frag_inds, mo_occ_type, frag_inds_type='atom', 
-        cutoff_type="overlap", cutoff=0.1, scutoff=1e-3):
+        basis=None, cutoff_type="overlap", cutoff=0, ov_adjust=True):
         """
         Parameters
         ----------
@@ -46,12 +47,18 @@ class PAO(ActiveSpace):
         """
         super().__init__(mf, mo_coeff=mo_occ_type)
         self.cutoff = cutoff
-        self.scutoff = scutoff
         self.cutoff_type = cutoff_type
+        if self.basis is None:
+            self.basis=mf.mol.basis
+        else:
+            self.basis = basis
+        self.ov_adjust=ov_adjust
+        self.fc_ints = FC_AO_Ints(mf.mol, 
+                                  frag_inds, frag_inds_type=frag_inds_type, 
+                                  basis_frag=basis)
         
         if frag_inds_type.lower() == "atom":
             self.frag_atm_inds = frag_inds
-            # aoslice_by_atom is geometric, spin-independent
             self.frag_ao_inds = np.concatenate([range(p0,p1) for b0,b1,p0,p1 in
                                     self.mf.mol.aoslice_by_atom()[frag_inds]]).astype(int)
         
@@ -61,61 +68,35 @@ class PAO(ActiveSpace):
         
         else:
             raise ValueError("frag_inds_type must be either 'atom' or 'orbital'")
-            
-    def population(self, mo_coeff, method='meta-lowdin'):
         
-        # Handle Unrestricted input recursively
-        if isinstance(mo_coeff, (list, tuple)):
-            return (self.population(mo_coeff[0], method), self.population(mo_coeff[1], method))
-
-        # set population method
-        if method=='mulliken':
-            mo = mo_coeff
-            s = self.mf.get_ovlp()
-            # Handle if S is tuple (rare for pure geometric overlap, but possible in some contexts)
-            if isinstance(s, (list, tuple)): s = s[0] 
-        else:
-            C = lo.orth_ao(self.mf.mol, method)
-            s_mat = self.mf.get_ovlp()
-            if isinstance(s_mat, (list, tuple)): s_mat = s_mat[0]
-            
-            mo = C.T @ s_mat @ mo_coeff
-            s = C.T @ s_mat @ C
-            
-        # calculate the total population on fragment AOs
-        fpops = []
-        for i in range(mo.shape[1]):
-            pops_i = np.diag(np.outer(mo[:,i],mo[:,i]) @ s)
-            fpops_i = np.sum(pops_i[self.frag_ao_inds])
-            fpops.append(fpops_i)
-            
-        fpops = np.array(fpops)
-        return fpops
-        
-    def _project_one_spin(self, moC, S):
+    def _project_one_spin(self, moC, S, ovlp_ff, ovlp_fc):
         """
         Helper function to generate PAOs for a single spin channel.
         """
         # Construct PAOs in AO basis
-        # P is the density matrix of the space (occ or vir) being projected
-        P = moC @ moC.T
-        C_pao = P @ S # unnormalized PAOs
-        
+        C_pao = moC @ moC.T @ ovlp_fc # unnormalized PAOs
             
-        C_pao_frag = P@S[:,self.frag_ao_inds]
-        S_pao_frag = C_pao_frag.T @ S @ C_pao_frag
+        S_pao_frag = C_pao.T @ S @ C_pao
 
-        # Orthonormalize fragment PAOs amongst each other
-        s, v = np.linalg.eigh(S_pao_frag)
+        if self.ov_adjust:
+            s, u = np.linalg.eigh(S_pao_frag)
+        else:
+            s, u = eigh(S_pao_frag, ovlp_ff)
+        s = np.abs(s)
+        
         # Filter out linearly dependent PAOs
-        mask_s = s > self.scutoff
-        C_pao_active = np.einsum("ab,ia->ib", v[:, mask_s] / np.sqrt(s[None, mask_s]), C_pao_frag)
+        if self.cutoff_type.lower() in ['overlap','pop','population']:
+            mask_act = s >= self.cutoff
+
+        if self.cutoff_type.lower() in ['norb','norb_act']:
+            assert isinstance(self.cutoff, int)
+            mask_act = np.zeros(len(s), dtype=bool)
+            top_inds = np.argsort(s)[-self.cutoff:]
+            mask_act[top_inds] = True
+            
+        C_pao_active = np.einsum("ia,ab->ib", C_pao, u[:, mask_act] / np.sqrt(s[None, mask_act]))
         
         # Generate Bath/Frozen PAOs (Project out active PAOs from original space)
-        # C_bath = C_orig - C_act C_act^T S C_orig ?? 
-        # Original code: C_pao_bath =  C_pao - C_pao_active@C_pao_active.T@S
-        # Note: This logic assumes C_pao spans the whole space initially. 
-        # C_pao was P@S. 
         C_pao_bath = C_pao - C_pao_active @ C_pao_active.T @ S
         S_pao_bath = C_pao_bath.T @ S @ C_pao_bath
         
@@ -125,10 +106,8 @@ class PAO(ActiveSpace):
         # We expect exactly (N_total - N_active) non-zero eigenvalues
         mask_bath = np.array([False] * len(s_bath))
         delmo = moC.shape[1] - C_pao_active.shape[1]
-        
         if delmo > 0:
             mask_bath[-delmo:] = True
-            
         C_pao_frozen = np.einsum("ab,ia->ib", v_bath[:, mask_bath] / np.sqrt(s_bath[None, mask_bath]), C_pao_bath)
         
         # Concatenate active and frozen PAOs
@@ -136,17 +115,19 @@ class PAO(ActiveSpace):
             
         # Unitary transformation from MOs to PAOs
         # u describes how to rotate Canonical MOs (moC) to get PAOs (C_final)
-        u = moC.T @ S @ C_final
+        v = moC.T @ S @ C_final
         
         norb_act = C_pao_active.shape[1]
-        P_act = u[:, 0:norb_act]
-        P_frz = u[:, norb_act:]
+        P_act = v[:, 0:norb_act]
+        P_frz = v[:, norb_act:]
         
         return P_act, P_frz, norb_act
 
     def calc_projection(self, debug=False):
         
         S = self.mf.get_ovlp()
+        ovlp_ff, ovlp_fc = self.fc_ints.calc_ao_ovlp()
+
         if isinstance(S, (list, tuple)) or (isinstance(S, np.ndarray) and S.ndim==3):
             # Handle case where overlap might be returned as array of arrays (e.g. k-points or weird UKS)
             # Usually PySCF get_ovlp() returns one matrix for molecules.
@@ -154,8 +135,8 @@ class PAO(ActiveSpace):
 
         if self.is_uhf:
             # Unrestricted: Project Alpha and Beta separately
-            P_act_a, P_frz_a, norb_a = self._project_one_spin(self.moC[0], S)
-            P_act_b, P_frz_b, norb_b = self._project_one_spin(self.moC[1], S)
+            P_act_a, P_frz_a, norb_a = self._project_one_spin(self.moC[0], S, ovlp_ff, ovlp_fc)
+            P_act_b, P_frz_b, norb_b = self._project_one_spin(self.moC[1], S, ovlp_ff, ovlp_fc)
             
             self.P_act = (P_act_a, P_act_b)
             self.P_frz = (P_frz_a, P_frz_b)

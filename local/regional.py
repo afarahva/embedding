@@ -16,7 +16,8 @@ class RegionalActiveSpace(ActiveSpace):
     
     def __init__(self, mf, frag_inds, mo_occ_type, 
         frag_inds_type="atom", basis='minao',
-        cutoff_type="overlap", cutoff=0.1, orth=False, frozen_core=False):
+        cutoff_type="overlap", cutoff=0.1, orth=False, frozen_core=False, 
+        ov_adjust=True):
         """
         Parameters
         ----------
@@ -63,6 +64,7 @@ class RegionalActiveSpace(ActiveSpace):
         self.cutoff = cutoff
         self.cutoff_type = cutoff_type
         self.basis = basis
+        self.ov_adjust=ov_adjust
         self.fc_ints = FC_AO_Ints(mf.mol, 
                                   frag_inds, frag_inds_type=frag_inds_type, 
                                   basis_frag=basis, orth=orth)
@@ -126,7 +128,10 @@ class RegionalActiveSpace(ActiveSpace):
         ovlp_f_mo = s_fc @ moC
         
         # P = (S_fi C)^T S_ff^-1 (S_fi C)
-        P_proj = ovlp_f_mo.conj().T @ np.linalg.inv(s_ff) @ ovlp_f_mo
+        if self.ov_adjust:
+            P_proj = ovlp_f_mo.conj().T @ np.linalg.inv(s_ff) @ ovlp_f_mo
+        else:
+            P_proj = ovlp_f_mo.conj().T @ ovlp_f_mo
         
         # diagonalize 
         s, u = np.linalg.eigh(P_proj)

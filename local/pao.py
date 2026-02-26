@@ -11,12 +11,13 @@ author: Ardavan Farahvash, github.com/afarahva
 import numpy as np
 from pyscf import lo
 from pyscf_embedding.utils import ActiveSpace, HFEmbedding
+from scipy.linalg import eigh
 
 # PAO generator
 class PAO(ActiveSpace):
     
     def __init__(self, mf, frag_inds, mo_occ_type, frag_inds_type='atom', 
-        cutoff_type="overlap", cutoff=0.1, scutoff=1e-3):
+        cutoff_type="overlap", ncutoff=0.05, scutoff=1e-3, ov_adjust=False):
         """
         Parameters
         ----------
@@ -45,10 +46,11 @@ class PAO(ActiveSpace):
             the fragment until the cutoff. 
         """
         super().__init__(mf, mo_coeff=mo_occ_type)
-        self.cutoff = cutoff
+        self.ncutoff = ncutoff
         self.scutoff = scutoff
         self.cutoff_type = cutoff_type
-        
+        self.ov_adjust=ov_adjust
+
         if frag_inds_type.lower() == "atom":
             self.frag_atm_inds = frag_inds
             # aoslice_by_atom is geometric, spin-independent
@@ -104,17 +106,15 @@ class PAO(ActiveSpace):
         # with significant population
 
         # NOTE: Kallay paper has the wrong formula...
-        # fpop = np.einsum("ij,ij->j", C_pao[self.frag_ao_inds,:], (S @ C_pao)[self.frag_ao_inds,:])
-        # fpop = np.einsum("ij,ij->i", C_pao[:,self.frag_ao_inds], (S @ C_pao)[:,self.frag_ao_inds])
-        fpop = np.diag( C_pao[self.frag_ao_inds,:].T @ S[np.ix_(self.frag_ao_inds,self.frag_ao_inds)] @ C_pao[self.frag_ao_inds,:])
+        fpop = np.einsum("ij,ij->j", C_pao[self.frag_ao_inds,:], (S @ C_pao)[self.frag_ao_inds,:])
         
 
         if self.cutoff_type.lower() in ['overlap','pop','population']:
-            mask = fpop > self.cutoff
+            mask = fpop > self.ncutoff
         elif self.cutoff_type.lower() in ['norb','norb_act']:
             indx_sort = np.flip(np.argsort(fpop))
             mask = np.zeros(len(fpop), dtype=bool)
-            mask[indx_sort[0:self.cutoff]] = True 
+            mask[indx_sort[0:self.ncutoff]] = True 
         else:
             raise ValueError("Incorrect cutoff type. Must be one of 'overlap', or 'norb'" )
             
@@ -122,10 +122,14 @@ class PAO(ActiveSpace):
         S_pao_frag = C_pao_frag.T @ S @ C_pao_frag
 
         # Orthonormalize fragment PAOs amongst each other
-        s, v = np.linalg.eigh(S_pao_frag)
+        if self.ov_adjust:
+            s, u = eigh(S_pao_frag, S[mask][:, mask])
+        else:
+            s, u = np.linalg.eigh(S_pao_frag)
+
         # Filter out linearly dependent PAOs
         mask_s = s > self.scutoff
-        C_pao_active = np.einsum("ab,ia->ib", v[:, mask_s] / np.sqrt(s[None, mask_s]), C_pao_frag)
+        C_pao_active = np.einsum("ia,ab->ib", C_pao_frag, u[:, mask_s] / np.sqrt(s[None, mask_s]))
         
         # Generate Bath/Frozen PAOs (Project out active PAOs from original space)
         # C_bath = C_orig - C_act C_act^T S C_orig ?? 
@@ -145,18 +149,18 @@ class PAO(ActiveSpace):
         if delmo > 0:
             mask_bath[-delmo:] = True
             
-        C_pao_frozen = np.einsum("ab,ia->ib", v_bath[:, mask_bath] / np.sqrt(s_bath[None, mask_bath]), C_pao_bath)
+        C_pao_frozen = np.einsum("ia,ab->ib", C_pao_bath, v_bath[:, mask_bath] / np.sqrt(s_bath[None, mask_bath]))
         
         # Concatenate active and frozen PAOs
         C_final = np.hstack([C_pao_active, C_pao_frozen])
             
         # Unitary transformation from MOs to PAOs
         # u describes how to rotate Canonical MOs (moC) to get PAOs (C_final)
-        u = moC.T @ S @ C_final
+        v = moC.T @ S @ C_final
         
         norb_act = C_pao_active.shape[1]
-        P_act = u[:, 0:norb_act]
-        P_frz = u[:, norb_act:]
+        P_act = v[:, 0:norb_act]
+        P_frz = v[:, norb_act:]
         
         return P_act, P_frz, norb_act
 
@@ -216,24 +220,24 @@ if __name__ == '__main__':
     print("\n--- RHF PAO Embedding ---")
     frag_inds=[0,1]
     occ_calc = None
-    vir_calc = PAO(mf, frag_inds, 'vir', cutoff=0.1)
+    vir_calc = PAO(mf, frag_inds, 'vir', ncutoff=0.05, ov_adjust=False)
     
     embed = HFEmbedding(occ_calc, vir_calc)
     moE_new, moC_new, indx_frz = embed.calc_mo()
     print(f"Number of frozen orbitals: {len(indx_frz)}")
-    
+
     # embedded
     mycc = cc.CCSD(mf)
     mycc.mo_coeff = moC_new
     mycc.frozen = indx_frz
     mycc.run()
-    
+    #%%
     print("\n--- UHF PAO Embedding ---")
     mol_u = pyscf.M(atom=coords,basis='ccpvdz', spin=0, verbose=3)
     mf_u = mol_u.UHF().run()
     
     # Use same logic for UHF
-    vir_calc_u = PAO(mf_u, frag_inds, 'vir', cutoff=0.1)
+    vir_calc_u = PAO(mf_u, frag_inds, 'vir', ncutoff=0.05)
     embed_u = HFEmbedding(None, vir_calc_u)
     
     moE_u, moC_u, indx_frz_u = embed_u.calc_mo()
