@@ -48,7 +48,7 @@ class PAO(ActiveSpace):
         super().__init__(mf, mo_coeff=mo_occ_type)
         self.cutoff = cutoff
         self.cutoff_type = cutoff_type
-        if self.basis is None:
+        if basis is None:
             self.basis=mf.mol.basis
         else:
             self.basis = basis
@@ -74,7 +74,7 @@ class PAO(ActiveSpace):
         Helper function to generate PAOs for a single spin channel.
         """
         # Construct PAOs in AO basis
-        C_pao = moC @ moC.T @ ovlp_fc # unnormalized PAOs
+        C_pao = moC @ moC.T @ ovlp_fc.T # unnormalized PAOs
             
         S_pao_frag = C_pao.T @ S @ C_pao
 
@@ -97,7 +97,7 @@ class PAO(ActiveSpace):
         C_pao_active = np.einsum("ia,ab->ib", C_pao, u[:, mask_act] / np.sqrt(s[None, mask_act]))
         
         # Generate Bath/Frozen PAOs (Project out active PAOs from original space)
-        C_pao_bath = C_pao - C_pao_active @ C_pao_active.T @ S
+        C_pao_bath = moC @ moC.T@S - C_pao_active @ C_pao_active.T @ S
         S_pao_bath = C_pao_bath.T @ S @ C_pao_bath
         
         s_bath, v_bath = np.linalg.eigh(S_pao_bath)
@@ -144,7 +144,7 @@ class PAO(ActiveSpace):
             
         else:
             # Restricted
-            P_act, P_frz, norb = self._project_one_spin(self.moC, S)
+            P_act, P_frz, norb = self._project_one_spin(self.moC, S, ovlp_ff, ovlp_fc)
             
             self.P_act = P_act
             self.P_frz = P_frz
