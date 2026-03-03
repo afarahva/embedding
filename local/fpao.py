@@ -79,9 +79,9 @@ class PAO(ActiveSpace):
         S_pao_frag = C_pao.T @ S @ C_pao
 
         if self.ov_adjust:
-            s, u = np.linalg.eigh(S_pao_frag)
-        else:
             s, u = eigh(S_pao_frag, ovlp_ff)
+        else:
+            s, u = np.linalg.eigh(S_pao_frag)
         s = np.abs(s)
         
         # Filter out linearly dependent PAOs
