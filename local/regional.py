@@ -65,6 +65,16 @@ class RegionalActiveSpace(ActiveSpace):
         self.cutoff_type = cutoff_type
         self.basis = basis
         self.ov_adjust=ov_adjust
+        
+        if frag_inds_type.lower() == "atom":
+            self.frag_atm_inds = frag_inds
+            self.frag_ao_inds = np.concatenate([range(p0,p1) for b0,b1,p0,p1 in
+                                    self.mf.mol.aoslice_by_atom()[frag_inds]]).astype(int)
+        
+        elif frag_inds_type.lower() == 'orbital':
+            self.frag_atm_inds = None
+            self.frag_ao_inds = frag_inds
+            
         self.fc_ints = FC_AO_Ints(mf.mol, 
                                   frag_inds, frag_inds_type=frag_inds_type, 
                                   basis_frag=basis, orth=orth)
@@ -101,10 +111,8 @@ class RegionalActiveSpace(ActiveSpace):
             
             # Check how many orbitals needed to hit cutoff
             n_needed = np.searchsorted(cumsum, self.cutoff) + 1
-            
-            # Map back to original indices (s is usually ascending from eigh)
-            # We select the N largest values
             mask_act = np.zeros(len(s), dtype=bool)
+            
             # Indices of largest N elements
             top_inds = np.argsort(s)[-n_needed:]
             mask_act[top_inds] = True
@@ -155,13 +163,10 @@ class RegionalActiveSpace(ActiveSpace):
             ovlp_ff, ovlp_fc = self.fc_ints.calc_ao_ovlp(moC_occ=self.moC)
         else:
             ovlp_ff, ovlp_fc = self.fc_ints.calc_ao_ovlp()
-
         if self.is_uhf:
             # Handle Unrestricted References
             # Note: For standard bases (minao), ovlp_ff/fc are single matrices (geometry only).
             # For IAO, they might be tuples if spin-dependent.
-            
-            # Helper to handle polymorphism of overlap matrices
             get_ovlp = lambda obj, idx: obj[idx] if isinstance(obj, (tuple, list)) else obj
             
             P_act_a, P_frz_a, norb_a, s_a = self._project_one_spin(
@@ -187,7 +192,6 @@ class RegionalActiveSpace(ActiveSpace):
             self.Norb_act = norb
             
             if debug:
-                self.P_proj = None # P_proj is transient in the helper
                 self.s_proj = s
                 self.ds_proj = s[1:] - s[0:-1]
         
@@ -195,14 +199,24 @@ class RegionalActiveSpace(ActiveSpace):
     
 # Subsystem Projected Atomic DEcomposition
 class SPADEActiveSpace(ActiveSpace):
-    def __init__(self, mf, frag_inds, mo_occ_type, 
-                 cutoff_type="spade", cutoff=0, frozen_core=False):
+    def __init__(self, mf, frag_inds, mo_occ_type,
+                 cutoff_type="spade", cutoff=0, frag_inds_type="atom", 
+                 frozen_core=False):
         
         super().__init__(mf, mo_coeff=mo_occ_type, frozen_core=frozen_core)
-        self.frag_inds = frag_inds
         self.cutoff = cutoff
         self.cutoff_type = cutoff_type
         
+        if frag_inds_type.lower() == "atom":
+            self.frag_atm_inds = frag_inds
+            self.frag_ao_inds = np.concatenate([range(p0,p1) for b0,b1,p0,p1 in
+                        self.mf.mol.aoslice_by_atom()[frag_inds]]).astype(int)
+            
+        elif frag_inds_type.lower() == 'orbital':
+            self.frag_atm_inds = None
+            self.frag_ao_inds = frag_inds
+            
+
     def _get_nact(self, s):
         """
         Helper method to determine active mask based on singular values s
@@ -248,8 +262,7 @@ class SPADEActiveSpace(ActiveSpace):
         from scipy.linalg import fractional_matrix_power
         
         # 1. Identify Fragment Indices
-        frag_ao_inds = np.concatenate([range(p0,p1) for b0,b1,p0,p1 in
-                    self.mf.mol.aoslice_by_atom()[self.frag_inds]]).astype(int)
+        frag_ao_inds = self.frag_ao_inds
         
         # 2. Prepare Overlap Matrix
         S = self.mf.get_ovlp()
@@ -296,7 +309,7 @@ class RegionalEmbedding(HFEmbedding):
         
         vir_calc = RegionalActiveSpace(mf, frag_inds, 'virtual', 
             frag_inds_type=frag_inds_type, basis=basis_vir, cutoff=cutoff_vir, 
-            cutoff_type="overlap", orth=orth, frozen_core=frozen_core)
+            cutoff_type="overlap", orth=orth, frozen_core=False)
         
         super().__init__(occ_calc, vir_calc)
          
@@ -347,7 +360,9 @@ class SPADE(HFEmbedding):
 #%%
 if __name__ == '__main__':
     import pyscf
-    from pyscf.tools import cubegen
+    from pyscf_embedding.utils import chemcore
+
+    
     coords = \
     """
     O         -3.65830        0.00520       -0.94634
@@ -374,7 +389,7 @@ if __name__ == '__main__':
     basis_occ='minao'
     basis_vir=mol.basis
     cutoff_occ=0.1
-    cutoff_vir=0.1
+    cutoff_vir=1e-6
     
     # traditional regional embedding
     re = RegionalEmbedding(mf, frag_inds, 'atom', basis_occ, basis_vir, cutoff_occ, cutoff_vir, orth=False, frozen_core=False)
@@ -383,19 +398,23 @@ if __name__ == '__main__':
     mycc.mo_coeff = moC_new
     mycc.frozen = indx_frz_re
     mycc.run()
-    print(mycc.e_corr)
-    
-    #%%
-    # spade embedding
-    occ_calc = SPADEActiveSpace(mf, frag_inds, 'occ')
-    vir_calc = SPADEActiveSpace(mf, frag_inds, 'vir')
-    embed = HFEmbedding(occ_calc, vir_calc)
-    moE_spade, moC_new, indx_frz_spade = embed.calc_mo()
-    
+    E_withcore = mycc.e_corr
+
+    # regional embedding with frozen fragment core
+    total_core = chemcore(mol,atm_indx=re.occ_calc.frag_atm_inds,spinorb=False)
+    indx_frz_withcore = np.unique(np.concatenate([indx_frz_re,np.arange(0,total_core)]))
+    mycc = pyscf.cc.CCSD(mf)
     mycc.mo_coeff = moC_new
-    mycc.frozen = indx_frz_spade
+    mycc.frozen = indx_frz_withcore
     mycc.run()
-    print(mycc.e_corr)
-    #%%
+    E_nocore = mycc.e_corr
     
-    
+    # new embedding with good frozen core argument
+    re = RegionalEmbedding(mf, frag_inds, 'atom', basis_occ, basis_vir, cutoff_occ, cutoff_vir, orth=False, frozen_core=True)
+    moE_re, moC_new, indx_frz_re = re.kernel()
+    mycc = pyscf.cc.CCSD(mf)
+    mycc.mo_coeff = moC_new
+    mycc.frozen = indx_frz_re
+    mycc.run()
+    E_nocore2 = mycc.e_corr
+    print(E_withcore,E_nocore,E_nocore2)

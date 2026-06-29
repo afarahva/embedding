@@ -64,8 +64,6 @@ class LMOActiveSpace(ActiveSpace):
             self.frag_atm_inds = frag_inds
             self.frag_ao_inds = np.concatenate([range(p0,p1) for b0,b1,p0,p1 in
                         self.mf.mol.aoslice_by_atom()[frag_inds]]).astype(int)
-        
-
         else:
             raise ValueError("frag_inds_type only supports 'atom' for LMO active space")
 

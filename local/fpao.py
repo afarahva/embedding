@@ -17,7 +17,7 @@ from pyscf_embedding.utils import ActiveSpace, HFEmbedding, FC_AO_Ints
 class PAO(ActiveSpace):
     
     def __init__(self, mf, frag_inds, mo_occ_type, frag_inds_type='atom', 
-        basis=None, cutoff_type="overlap", cutoff=0, ov_adjust=True):
+        basis=None, cutoff_type="overlap", cutoff=0, ov_adjust=False):
         """
         Parameters
         ----------

@@ -122,12 +122,10 @@ class FC_AO_Ints:
         self.mol2.build()
 
         if frag_inds_type.lower() == "atom":
-            self.frag_atm_inds = frag_inds
             self.frag_ao_inds = np.concatenate([range(p0,p1) for b0,b1,p0,p1 in
                                                 self.mol2.aoslice_by_atom()[frag_inds]]).astype(int)
         
         elif frag_inds_type.lower() == 'orbital':
-            self.frag_atm_inds = None
             self.frag_ao_inds = frag_inds
         
         else:
@@ -328,33 +326,10 @@ class ActiveSpace:
                 self.moC = self.mf.mo_coeff[:,mask]
         
         # frozen core approximation
-        if frozen_core:
-            if isinstance(mo_coeff, str) and mo_coeff.lower() not in ['o','occ','occupied']:
-                self.log.error('''frozen core only supported for occ orbital transformations''')
-                sys.exit()
-            
-            ncore = chemcore(self.mf.mol)
-            indx_core = np.arange(0, ncore, dtype=np.int64)
-
-            if self.is_uhf:
-                # Freeze lowest N orbitals for both alpha and beta
-                self.moE_core = (self.moE[0][indx_core], self.moE[1][indx_core])
-                self.moC_core = (self.moC[0][:,indx_core], self.moC[1][:,indx_core])
-                self.moE = (np.delete(self.moE[0], indx_core), np.delete(self.moE[1], indx_core))
-                self.moC = (np.delete(self.moC[0], indx_core, axis=1), np.delete(self.moC[1], indx_core, axis=1))
-            else:
-                self.moE_core = self.moE[indx_core]
-                self.moC_core = self.moC[:,indx_core]
-                self.moE = np.delete(self.moE, indx_core)
-                self.moC = np.delete(self.moC, indx_core, axis=1)
-        else:
-            # Empty placeholders
-            if self.is_uhf:
-                self.moE_core = (np.array([]), np.array([]))
-                self.moC_core = (np.zeros((self.moC[0].shape[0],0)), np.zeros((self.moC[1].shape[0],0)))
-            else:
-                self.moE_core = np.array([])
-                self.moC_core = np.zeros((self.moC.shape[0],0))
+        if frozen_core and isinstance(mo_coeff, str) and \
+                                 mo_coeff.lower() not in ['o','occ','occupied']:
+            self.log.error('''frozen core only supported for occ orbital transformations''')
+            sys.exit()
         
     def pseudocanonical(self, moE, moC, P):
         """
@@ -391,15 +366,13 @@ class ActiveSpace:
                 P_frz_s = self.P_frz[s] if self.P_frz is not None else None
                 moE_s = self.moE[s]
                 moC_s = self.moC[s]
-                moE_core_s = self.moE_core[s]
-                moC_core_s = self.moC_core[s]
 
                 if P_act_s is not None:
                     moE_act, moC_act = self.pseudocanonical(moE_s, moC_s, P_act_s)
                     moE_frz, moC_frz = self.pseudocanonical(moE_s, moC_s, P_frz_s)
                     
-                    moC_final = np.hstack([moC_act, moC_core_s, moC_frz])
-                    moE_final = np.hstack([moE_act, moE_core_s, moE_frz])
+                    moC_final = np.hstack([moC_act, moC_frz])
+                    moE_final = np.hstack([moE_act, moE_frz])
                     
                     # Norb_act might be tuple (N_a, N_b) or scalar
                     n_act = self.Norb_act[s] if isinstance(self.Norb_act, (tuple,list)) else self.Norb_act
@@ -414,6 +387,12 @@ class ActiveSpace:
                 res_moE.append(moE_final[order])
                 res_moC.append(moC_final[:, order])
                 res_mask.append(mask_act[order])
+                
+                # frozen core - ensure orbitals up to Ncore are frozen
+                # for uhf, freeze the same number of electrons per spin channel
+                if self.frozen_core:
+                    ncore = chemcore(self.mf.mol,spinorb=False)
+                    res_mask[0:ncore]=False
             
             return tuple(res_moE), tuple(res_moC), tuple(res_mask)
 
@@ -422,8 +401,8 @@ class ActiveSpace:
             if self.P_act is not None:
                 moE_act, moC_act = self.pseudocanonical(self.moE, self.moC, self.P_act)
                 moE_frz, moC_frz = self.pseudocanonical(self.moE, self.moC, self.P_frz)
-                moC = np.hstack([moC_act, self.moC_core, moC_frz])
-                moE = np.hstack([moE_act, self.moE_core, moE_frz])
+                moC = np.hstack([moC_act, moC_frz])
+                moE = np.hstack([moE_act, moE_frz])
                 mask_act = np.arange(len(moE)) < self.Norb_act
             else:
                 moC = self.moC
@@ -431,7 +410,13 @@ class ActiveSpace:
                 mask_act = np.array([True]*len(moE))
             
             order = np.argsort(moE)
-            return moE[order], moC[:,order], mask_act[order]
+            moE = moE[order]
+            moC = moC[:,order]
+            mask_act = mask_act[order]
+            if self.frozen_core:
+                ncore = chemcore(self.mf.mol,spinorb=False)
+                mask_act[0:ncore]=False
+            return moE, moC, mask_act
 
 
 class HFEmbedding:
