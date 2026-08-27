@@ -847,14 +847,29 @@ class uPRBE(rPRBE):
 
         # find indices of bath/frozen MOs
         if filtermo:
-            epsilon = 1e-5
+            epsilon = 1e-8
             mask_act_a = np.linalg.norm(mf_A.mo_coeff[0].T @ ovlp @ np.hstack([self.moC_occ_B[0], self.moC_vir_B[0]]), axis=1) <= epsilon
             mask_act_b = np.linalg.norm(mf_A.mo_coeff[1].T @ ovlp @ np.hstack([self.moC_occ_B[1], self.moC_vir_B[1]]), axis=1) <= epsilon
-                            
-            mf_A.mo_energy = (mf_A.mo_energy[0][mask_act_a], mf_A.mo_energy[1][mask_act_b])
-            mf_A.mo_coeff = (mf_A.mo_coeff[0][:, mask_act_a], mf_A.mo_coeff[1][:, mask_act_b])
-            mf_A.mo_occ = (mf_A.mo_occ[0][mask_act_a], mf_A.mo_occ[1][mask_act_b])
-                
+            
+            # pad arrays in the case that the number of active alpha/beta orbitals is different
+            N_act_a, N_act_b = np.sum(mask_act_a),np.sum(mask_act_b)
+            N_max = max(N_act_a,N_act_b)
+            mo_energy = np.zeros((2,N_max),dtype=np.float64)+1e30
+            mo_coeff = np.zeros((2,mf_A.mo_coeff.shape[1],N_max),dtype=np.float64)
+            mo_occ = np.zeros((2,N_max),dtype=np.float64)
+            #
+            mo_energy[0,0:N_act_a] = mf_A.mo_energy[0][mask_act_a]
+            mo_energy[1,0:N_act_b] = mf_A.mo_energy[1][mask_act_b]
+            mo_coeff[0,:,0:N_act_a] = mf_A.mo_coeff[0][:, mask_act_a]
+            mo_coeff[1,:,0:N_act_b] = mf_A.mo_coeff[1][:, mask_act_b]
+            mo_occ[0,0:N_act_a] = mf_A.mo_occ[0][mask_act_a]
+            mo_occ[1,0:N_act_b] = mf_A.mo_occ[1][mask_act_b]
+            #
+            mf_A.mo_energy=mo_energy
+            mf_A.mo_coeff=mo_coeff
+            mf_A.mo_occ=mo_occ
+            del mo_energy,mo_coeff,mo_occ
+            
         # calculate total energy
         energy_a_in_b = self.energy_embed - mf_A.energy_nuc()
                     
