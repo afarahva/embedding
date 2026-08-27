@@ -631,10 +631,9 @@ class rPRBE:
 
         # find indices of bath/frozen MOs
         if filtermo:
-            epsilon = 1e-6
-            mask_act = np.linalg.norm( \
-              mf_A.mo_coeff.T @ ovlp @ np.hstack([self.moC_occ_B,self.moC_vir_B])\
-                        ,axis=1) <= epsilon
+            bath_ovlp = np.linalg.norm(mf_A.mo_coeff.T @ ovlp @ np.hstack([self.moC_occ_B, self.moC_vir_B]), axis=1) 
+            N = len(self.moE_occ_A)+len(self.moE_vir_A)
+            mask_act = np.isin(np.arange(bath_ovlp.size), np.argpartition(bath_ovlp, N)[:N])
                 
             mf_A.mo_energy = mf_A.mo_energy[mask_act]
             mf_A.mo_coeff = mf_A.mo_coeff[:,mask_act]
@@ -847,9 +846,13 @@ class uPRBE(rPRBE):
 
         # find indices of bath/frozen MOs
         if filtermo:
-            epsilon = 1e-8
-            mask_act_a = np.linalg.norm(mf_A.mo_coeff[0].T @ ovlp @ np.hstack([self.moC_occ_B[0], self.moC_vir_B[0]]), axis=1) <= epsilon
-            mask_act_b = np.linalg.norm(mf_A.mo_coeff[1].T @ ovlp @ np.hstack([self.moC_occ_B[1], self.moC_vir_B[1]]), axis=1) <= epsilon
+            bath_ovlp = np.linalg.norm(mf_A.mo_coeff[0].T @ ovlp @ np.hstack([self.moC_occ_B[0], self.moC_vir_B[0]]), axis=1) 
+            N = len(self.moE_occ_A[0])+len(self.moE_vir_A[0])
+            mask_act_a = np.isin(np.arange(bath_ovlp.size), np.argpartition(bath_ovlp, N)[:N])
+            
+            bath_ovlp = np.linalg.norm(mf_A.mo_coeff[1].T @ ovlp @ np.hstack([self.moC_occ_B[1], self.moC_vir_B[1]]), axis=1)
+            N = len(self.moE_occ_A[1])+len(self.moE_vir_A[1])
+            mask_act_b = np.isin(np.arange(bath_ovlp.size), np.argpartition(bath_ovlp, N)[:N])
             
             # pad arrays in the case that the number of active alpha/beta orbitals is different
             N_act_a, N_act_b = np.sum(mask_act_a),np.sum(mask_act_b)
