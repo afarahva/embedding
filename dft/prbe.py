@@ -591,6 +591,7 @@ class rPRBE:
         f_ab = mf_B.get_fock()
         v_a = mf_B.get_veff(dm=dm_A0)
         hcore = f_ab - v_a
+        print(hcore - mf_B.get_hcore())
         
         # construct huzinaga projector
         projector = self.get_huzinaga(f_ab, ovlp)
@@ -631,10 +632,10 @@ class rPRBE:
 
         # find indices of bath/frozen MOs
         if filtermo:
-            bath_ovlp = np.linalg.norm(mf_A.mo_coeff.T @ ovlp @ np.hstack([self.moC_occ_B, self.moC_vir_B]), axis=1) 
-            N = len(self.moE_occ_A)+len(self.moE_vir_A)
-            mask_act = np.isin(np.arange(bath_ovlp.size), np.argpartition(bath_ovlp, N)[:N])
-                
+            bath_ovlp = np.linalg.norm(mf_A.mo_coeff.T @ ovlp @ np.hstack([self.moC_occ_B, self.moC_vir_B]), axis=1)
+            N = len(self.moE_occ_A)+len(self.moE_vir_A)            
+            mask_act = np.isin(np.arange(bath_ovlp.size), np.argpartition(bath_ovlp, min(N, bath_ovlp.size - 1))[:N])
+
             mf_A.mo_energy = mf_A.mo_energy[mask_act]
             mf_A.mo_coeff = mf_A.mo_coeff[:,mask_act]
             mf_A.mo_occ = mf_A.mo_occ[mask_act]
@@ -644,6 +645,7 @@ class rPRBE:
                 
         # recombined energy with embedded part
         self.e_tot = mf_B.e_tot - self.energy_a + energy_a_in_b
+        print(mf_B.e_tot - self.energy_a - mf_B.energy_nuc())
         self.e_tot -= self.calc_disp_embed()
 
         return self.e_tot, mf_A.mo_energy, mf_A.mo_coeff, mf_A.mo_occ
@@ -848,11 +850,11 @@ class uPRBE(rPRBE):
         if filtermo:
             bath_ovlp = np.linalg.norm(mf_A.mo_coeff[0].T @ ovlp @ np.hstack([self.moC_occ_B[0], self.moC_vir_B[0]]), axis=1) 
             N = len(self.moE_occ_A[0])+len(self.moE_vir_A[0])
-            mask_act_a = np.isin(np.arange(bath_ovlp.size), np.argpartition(bath_ovlp, N)[:N])
+            mask_act_a = np.isin(np.arange(bath_ovlp.size), np.argpartition(bath_ovlp, min(N, bath_ovlp.size - 1))[:N])
             
             bath_ovlp = np.linalg.norm(mf_A.mo_coeff[1].T @ ovlp @ np.hstack([self.moC_occ_B[1], self.moC_vir_B[1]]), axis=1)
             N = len(self.moE_occ_A[1])+len(self.moE_vir_A[1])
-            mask_act_b = np.isin(np.arange(bath_ovlp.size), np.argpartition(bath_ovlp, N)[:N])
+            mask_act_b = np.isin(np.arange(bath_ovlp.size), np.argpartition(bath_ovlp, min(N, bath_ovlp.size - 1))[:N])
             
             # pad arrays in the case that the number of active alpha/beta orbitals is different
             N_act_a, N_act_b = np.sum(mask_act_a),np.sum(mask_act_b)

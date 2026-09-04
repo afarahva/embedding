@@ -337,15 +337,15 @@ class rVPRBE(rPRBE):
             )
         self.e_tot = mf_A.e_tot
 
+        # find indices of bath/frozen MOs
         if filtermo:
-            epsilon = 1e-5
-            bath_orbs = np.hstack([self.moC_occ_B, self.moC_vir_B])
-            if bath_orbs.shape[1] > 0:
-                mask_act = np.linalg.norm(mf_A.mo_coeff.T @ ovlp @ bath_orbs,
-                                          axis=1) <= epsilon
-                mf_A.mo_energy = mf_A.mo_energy[mask_act]
-                mf_A.mo_coeff = mf_A.mo_coeff[:, mask_act]
-                mf_A.mo_occ = mf_A.mo_occ[mask_act]
+            bath_ovlp = np.linalg.norm(mf_A.mo_coeff.T @ ovlp @ np.hstack([self.moC_occ_B, self.moC_vir_B]), axis=1) 
+            N = len(self.moE_occ_A)+len(self.moE_vir_A)
+            mask_act = np.isin(np.arange(bath_ovlp.size), np.argpartition(bath_ovlp, min(N, bath_ovlp.size - 1))[:N])
+                
+            mf_A.mo_energy = mf_A.mo_energy[mask_act]
+            mf_A.mo_coeff = mf_A.mo_coeff[:,mask_act]
+            mf_A.mo_occ = mf_A.mo_occ[mask_act]            
 
         self.e_tot -= self.calc_disp_embed()
         return self.e_tot, mf_A.mo_energy, mf_A.mo_coeff, mf_A.mo_occ
@@ -428,29 +428,35 @@ class uVPRBE(uPRBE):
             )
         self.e_tot = mf_A.e_tot
 
+        # find indices of bath/frozen MOs
         if filtermo:
-            epsilon = 1e-5
-            bath_a = np.hstack([self.moC_occ_B[0], self.moC_vir_B[0]])
-            bath_b = np.hstack([self.moC_occ_B[1], self.moC_vir_B[1]])
-            if bath_a.shape[1] > 0:
-                mask_act_a = np.linalg.norm(
-                    mf_A.mo_coeff[0].T @ ovlp @ bath_a, axis=1
-                ) <= epsilon
-                mf_A.mo_energy = (mf_A.mo_energy[0][mask_act_a],
-                                  mf_A.mo_energy[1])
-                mf_A.mo_coeff = (mf_A.mo_coeff[0][:, mask_act_a],
-                                 mf_A.mo_coeff[1])
-                mf_A.mo_occ = (mf_A.mo_occ[0][mask_act_a], mf_A.mo_occ[1])
-            if bath_b.shape[1] > 0:
-                mask_act_b = np.linalg.norm(
-                    mf_A.mo_coeff[1].T @ ovlp @ bath_b, axis=1
-                ) <= epsilon
-                mf_A.mo_energy = (mf_A.mo_energy[0],
-                                  mf_A.mo_energy[1][mask_act_b])
-                mf_A.mo_coeff = (mf_A.mo_coeff[0],
-                                 mf_A.mo_coeff[1][:, mask_act_b])
-                mf_A.mo_occ = (mf_A.mo_occ[0], mf_A.mo_occ[1][mask_act_b])
-
+            bath_ovlp = np.linalg.norm(mf_A.mo_coeff[0].T @ ovlp @ np.hstack([self.moC_occ_B[0], self.moC_vir_B[0]]), axis=1) 
+            N = len(self.moE_occ_A[0])+len(self.moE_vir_A[0])
+            mask_act_a = np.isin(np.arange(bath_ovlp.size), np.argpartition(bath_ovlp, min(N, bath_ovlp.size - 1))[:N])
+            
+            bath_ovlp = np.linalg.norm(mf_A.mo_coeff[1].T @ ovlp @ np.hstack([self.moC_occ_B[1], self.moC_vir_B[1]]), axis=1)
+            N = len(self.moE_occ_A[1])+len(self.moE_vir_A[1])
+            mask_act_b = np.isin(np.arange(bath_ovlp.size), np.argpartition(bath_ovlp, min(N, bath_ovlp.size - 1))[:N])
+            
+            # pad arrays in the case that the number of active alpha/beta orbitals is different
+            N_act_a, N_act_b = np.sum(mask_act_a),np.sum(mask_act_b)
+            N_max = max(N_act_a,N_act_b)
+            mo_energy = np.zeros((2,N_max),dtype=np.float64)+1e30
+            mo_coeff = np.zeros((2,mf_A.mo_coeff.shape[1],N_max),dtype=np.float64)
+            mo_occ = np.zeros((2,N_max),dtype=np.float64)
+            #
+            mo_energy[0,0:N_act_a] = mf_A.mo_energy[0][mask_act_a]
+            mo_energy[1,0:N_act_b] = mf_A.mo_energy[1][mask_act_b]
+            mo_coeff[0,:,0:N_act_a] = mf_A.mo_coeff[0][:, mask_act_a]
+            mo_coeff[1,:,0:N_act_b] = mf_A.mo_coeff[1][:, mask_act_b]
+            mo_occ[0,0:N_act_a] = mf_A.mo_occ[0][mask_act_a]
+            mo_occ[1,0:N_act_b] = mf_A.mo_occ[1][mask_act_b]
+            #
+            mf_A.mo_energy=mo_energy
+            mf_A.mo_coeff=mo_coeff
+            mf_A.mo_occ=mo_occ
+            del mo_energy,mo_coeff,mo_occ
+        
         self.e_tot -= self.calc_disp_embed()
         return self.e_tot, mf_A.mo_energy, mf_A.mo_coeff, mf_A.mo_occ
 
@@ -525,7 +531,7 @@ if __name__ == '__main__':
     _,moC_occ,mask_occ_act = occ_calc.calc_mo()
     _,moC_vir,mask_vir_act = vir_calc.calc_mo()
 
-    embed1 = rPRBE(mf1, moC_occ, moC_vir, mask_occ_act, mask_vir_act)
+    embed1 = rPRBE(mf1, occ_calc, vir_calc)
     e_mf,mo_energy,mo_coeff,mo_occ = embed1.kernel(xc_embed=None)
     mycc1 = cc.CCSD(embed1.mf_A)
     mycc1.kernel()
@@ -537,7 +543,7 @@ if __name__ == '__main__':
     _,moC_occ,mask_occ_act = occ_calc.calc_mo()
     _,moC_vir,mask_vir_act = vir_calc.calc_mo()
 
-    embed2 = rPRBE(mf2, moC_occ, moC_vir, mask_occ_act, mask_vir_act)
+    embed2 = rPRBE(mf2, occ_calc, vir_calc)
     e_mf,mo_energy,mo_coeff,mo_occ = embed2.kernel(xc_embed=None)
     mycc2 = cc.CCSD(embed2.mf_A)
     mycc2.kernel()
@@ -554,7 +560,7 @@ if __name__ == '__main__':
     _,moC_occ,mask_occ_act = occ_calc.calc_mo()
     _,moC_vir,mask_vir_act = vir_calc.calc_mo()
 
-    embed1 = rVPRBE(mf1, moC_occ, moC_vir, mask_occ_act, mask_vir_act)
+    embed1 = rVPRBE(mf1, occ_calc, vir_calc)
     e_mf,mo_energy,mo_coeff,mo_occ = embed1.kernel(xc_embed=None)
     mycc1 = cc.CCSD(embed1.mf_A)
     mycc1.kernel()
@@ -566,7 +572,7 @@ if __name__ == '__main__':
     _,moC_occ,mask_occ_act = occ_calc.calc_mo()
     _,moC_vir,mask_vir_act = vir_calc.calc_mo()
 
-    embed2 = rVPRBE(mf2, moC_occ, moC_vir, mask_occ_act, mask_vir_act)
+    embed2 = rVPRBE(mf2, occ_calc, vir_calc)
     e_mf,mo_energy,mo_coeff,mo_occ = embed2.kernel(xc_embed=None)
     mycc2 = cc.CCSD(embed2.mf_A)
     mycc2.kernel()
