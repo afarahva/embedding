@@ -591,7 +591,6 @@ class rPRBE:
         f_ab = mf_B.get_fock()
         v_a = mf_B.get_veff(dm=dm_A0)
         hcore = f_ab - v_a
-        print(hcore - mf_B.get_hcore())
         
         # construct huzinaga projector
         projector = self.get_huzinaga(f_ab, ovlp)
@@ -645,7 +644,6 @@ class rPRBE:
                 
         # recombined energy with embedded part
         self.e_tot = mf_B.e_tot - self.energy_a + energy_a_in_b
-        print(mf_B.e_tot - self.energy_a - mf_B.energy_nuc())
         self.e_tot -= self.calc_disp_embed()
 
         return self.e_tot, mf_A.mo_energy, mf_A.mo_coeff, mf_A.mo_occ
