@@ -538,32 +538,46 @@ class rPRBE:
         mf_B.e_tot already contains E_disp(all atoms).  Subtracting E_disp(frag)
         from self.e_tot removes the fragment self-dispersion that was computed at
         the low level, leaving only the inter-fragment and environment dispersion
-        from mf_B.  Returns 0.0 if mf_B carries no D3/D4 dispersion object.
+        from mf_B.  Returns 0.0 if mf_B carries no D3/D4 dispersion correction.
+
+        Handles both the built-in dispersion of PySCF >= 2.5 (enabled through the
+        xc name, e.g. 'wb97x-d3bj', or mf.disp, and evaluated by mf.get_dispersion)
+        and the older pyscf-dispersion wrappers (mf.with_dftd3 / mf.with_dftd4).
         """
         mf_B = self.mf_B
         mol = mf_B.mol
 
         d3 = getattr(mf_B, 'with_dftd3', None)
         d4 = getattr(mf_B, 'with_dftd4', None)
+        builtin = (d3 is None and d4 is None and callable(getattr(mf_B, 'do_disp', None))
+                   and mf_B.do_disp())
 
-        if d3 is None and d4 is None:
+        if d3 is None and d4 is None and not builtin:
             return 0.0
 
         frag_inds = self.frag_inds
         if frag_inds is None:
             raise ValueError("frag_inds required for d3/d4 dispersion")
 
-        # Build fragment-only molecule (no integrals needed, just geometry)
+        # Build fragment-only molecule (no integrals needed, just geometry; the spin
+        # only has to be consistent with the fragment's electron count)
         frag_atoms = [(mol.atom_symbol(i), mol.atom_coord(i)) for i in frag_inds]
         mol_frag = gto.Mole()
         mol_frag.atom = frag_atoms
         mol_frag.basis = mol.basis
         mol_frag.unit = 'Bohr'
+        mol_frag.spin = int(round(sum(mol.atom_charges()[i] for i in frag_inds))) % 2
         mol_frag.verbose = 0
         mol_frag.build(False, False)
 
         # Fragment dispersion with the same parameters as mf_B
-        if d3 is not None:
+        if builtin:
+            # same functional, dispersion version and 3-body setting as mf_B
+            mf_frag = mf_B.copy()
+            mf_frag.mol = mol_frag
+            mf_frag.scf_summary = {}  # get_dispersion writes here; keep mf_B's record intact
+            return mf_frag.get_dispersion()
+        elif d3 is not None:
             from pyscf.dftd3 import dftd3 as _dftd3
             d3_frag = _dftd3.DFTD3Dispersion(
                 mol_frag, xc=d3.xc,
