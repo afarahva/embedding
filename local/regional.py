@@ -52,7 +52,8 @@ class RegionalActiveSpace(ActiveSpace):
             the fragment until a percentage of the total overlap is reached.
             
             'norb' assigns active MOs as those with the higest overlap with 
-            the fragment until the cutoff. 
+            the fragment until the cutoff. For unrestricted references the
+            cutoff can also be an (alpha, beta) pair.
             
         orth : Bool
             Whether to orthogonalization fragment orbitals. Default is False.
@@ -79,9 +80,10 @@ class RegionalActiveSpace(ActiveSpace):
                                   frag_inds, frag_inds_type=frag_inds_type, 
                                   basis_frag=basis, orth=orth)
         
-    def _get_active_mask(self, s):
+    def _get_active_mask(self, s, spin=0):
         """
         Helper method to determine active mask based on singular values s
+        (spin picks the entry of an (alpha, beta) 'norb' cutoff)
         """
         if self.cutoff_type.lower() in ['overlap','pop','population']:
             mask_act = s >= self.cutoff
@@ -118,18 +120,19 @@ class RegionalActiveSpace(ActiveSpace):
             mask_act[top_inds] = True
             
         elif self.cutoff_type.lower() in ['norb','norb_act']:
-            assert isinstance(self.cutoff, int)
+            norb = self.cutoff[spin] if isinstance(self.cutoff, (tuple, list)) else self.cutoff
+            assert isinstance(norb, (int, np.integer)) and 0 <= norb <= len(s)
             mask_act = np.zeros(len(s), dtype=bool)
             # Select largest N elements
-            top_inds = np.argsort(s)[-self.cutoff:]
-            mask_act[top_inds] = True
+            if norb > 0:
+                mask_act[np.argsort(s)[-norb:]] = True
 
         else:
             raise ValueError("Incorrect cutoff type. Must be one of 'overlap', 'pct_occ' or 'Norb'" )
             
         return mask_act
 
-    def _project_one_spin(self, moC, s_ff, s_fc):
+    def _project_one_spin(self, moC, s_ff, s_fc, spin=0):
         """
         Performs projection and diagonalization for a single spin channel.
         """
@@ -146,7 +149,7 @@ class RegionalActiveSpace(ActiveSpace):
         s[s < 0] = 0
         
         # select indices of active orbitals
-        mask_act = self._get_active_mask(s)
+        mask_act = self._get_active_mask(s, spin)
         
         # construct unitary projector 
         P_act = u[:, mask_act]
@@ -170,10 +173,10 @@ class RegionalActiveSpace(ActiveSpace):
             get_ovlp = lambda obj, idx: obj[idx] if isinstance(obj, (tuple, list)) else obj
             
             P_act_a, P_frz_a, norb_a, s_a = self._project_one_spin(
-                self.moC[0], get_ovlp(ovlp_ff, 0), get_ovlp(ovlp_fc, 0)
+                self.moC[0], get_ovlp(ovlp_ff, 0), get_ovlp(ovlp_fc, 0), spin=0
             )
             P_act_b, P_frz_b, norb_b, s_b = self._project_one_spin(
-                self.moC[1], get_ovlp(ovlp_ff, 1), get_ovlp(ovlp_fc, 1)
+                self.moC[1], get_ovlp(ovlp_ff, 1), get_ovlp(ovlp_fc, 1), spin=1
             )
             
             self.P_act = (P_act_a, P_act_b)

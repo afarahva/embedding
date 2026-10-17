@@ -18,6 +18,40 @@ from functools import partial
 from pyscf import __config__
 TIGHT_GRAD_CONV_TOL = getattr(__config__, 'scf_hf_kernel_tight_grad_conv_tol', True)
 
+def pairwise_dispersion(mf):
+    """Atom-pair decomposition of the built-in D3/D4 correction of mf (PySCF >= 2.5).
+
+    Returns an (natm, natm) array whose elements sum to mf.get_dispersion(): the
+    two-body energies (and, if the 3-body ATM term is on, its pairwise share) as
+    partitioned by simple-dftd3 / dftd4, with the coordination numbers (D3) and
+    charges (D4) of the whole molecule. Uses the libraries of pyscf-dispersion.
+    """
+    import ctypes
+    from pyscf.scf.dispersion import parse_disp
+    from pyscf.dispersion import dftd3, dftd4
+
+    method, version, with_3body = parse_disp(getattr(mf, 'xc', 'hf'), getattr(mf, 'disp', None))
+    if version[:2].upper() == 'D3':
+        lib, model = dftd3.libdftd3, dftd3.DFTD3Dispersion(mf.mol, xc=method, version=version, atm=with_3body)
+        get_pairwise, error_check = lib.dftd3_get_pairwise_dispersion, dftd3.error_check
+        new_error, delete_error = lib.dftd3_new_error, lib.dftd3_delete_error
+    elif version[:2].upper() == 'D4':
+        lib, model = dftd4.libdftd4, dftd4.DFTD4Dispersion(mf.mol, xc=method, atm=with_3body)
+        get_pairwise, error_check = lib.dftd4_get_pairwise_dispersion, dftd4.error_check
+        new_error, delete_error = lib.dftd4_new_error, lib.dftd4_delete_error
+    else:
+        raise RuntimeError('dispersion correction %s is not supported' % version)
+
+    natm = mf.mol.natm
+    pair2 = np.zeros((natm, natm))
+    pair3 = np.zeros((natm, natm))
+    err = new_error()
+    get_pairwise(err, model._mol, model._disp, model._param,
+                 pair2.ctypes.data_as(ctypes.c_void_p), pair3.ctypes.data_as(ctypes.c_void_p))
+    error_check(err)
+    delete_error(ctypes.byref(err))
+    return pair2 + pair3
+
 def huzinaga_kernel(mf, hcore, conv_tol=1e-10, conv_tol_grad=None,
            dump_chk=True, dm0=None, callback=None, conv_check=True, 
            P_occ_B=None, P_vir_B=None, **kwargs):
@@ -533,16 +567,20 @@ class rPRBE:
         return deltaE
 
     def calc_disp_embed(self):
-        """Return E_disp(frag atoms only) for D3/D4 functionals.
+        """Return the fragment-fragment dispersion for D3/D4 functionals.
 
-        mf_B.e_tot already contains E_disp(all atoms).  Subtracting E_disp(frag)
-        from self.e_tot removes the fragment self-dispersion that was computed at
-        the low level, leaving only the inter-fragment and environment dispersion
-        from mf_B.  Returns 0.0 if mf_B carries no D3/D4 dispersion correction.
+        mf_B.e_tot already contains E_disp(all atoms) = env-env + frag-env +
+        frag-frag atom pairs. Subtracting the frag-frag pairs from self.e_tot
+        removes the fragment self-dispersion that was computed at the low level,
+        leaving exactly the env-env and frag-env dispersion from mf_B. Returns
+        0.0 if mf_B carries no D3/D4 dispersion correction.
 
-        Handles both the built-in dispersion of PySCF >= 2.5 (enabled through the
-        xc name, e.g. 'wb97x-d3bj', or mf.disp, and evaluated by mf.get_dispersion)
-        and the older pyscf-dispersion wrappers (mf.with_dftd3 / mf.with_dftd4).
+        For the built-in dispersion of PySCF >= 2.5 (enabled through the xc name,
+        e.g. 'wb97x-d3bj', or mf.disp) the frag-frag pairs are taken from the
+        pairwise decomposition of the full-system correction, so they keep the
+        full-system coordination numbers. The older pyscf-dispersion wrappers
+        (mf.with_dftd3 / mf.with_dftd4) have no pairwise output; for them the
+        dispersion of the fragment alone is returned instead.
         """
         mf_B = self.mf_B
         mol = mf_B.mol
@@ -559,6 +597,10 @@ class rPRBE:
         if frag_inds is None:
             raise ValueError("frag_inds required for d3/d4 dispersion")
 
+        if builtin:
+            frag_inds = np.asarray(frag_inds, dtype=int)
+            return pairwise_dispersion(mf_B)[np.ix_(frag_inds, frag_inds)].sum()
+
         # Build fragment-only molecule (no integrals needed, just geometry; the spin
         # only has to be consistent with the fragment's electron count)
         frag_atoms = [(mol.atom_symbol(i), mol.atom_coord(i)) for i in frag_inds]
@@ -571,13 +613,7 @@ class rPRBE:
         mol_frag.build(False, False)
 
         # Fragment dispersion with the same parameters as mf_B
-        if builtin:
-            # same functional, dispersion version and 3-body setting as mf_B
-            mf_frag = mf_B.copy()
-            mf_frag.mol = mol_frag
-            mf_frag.scf_summary = {}  # get_dispersion writes here; keep mf_B's record intact
-            return mf_frag.get_dispersion()
-        elif d3 is not None:
+        if d3 is not None:
             from pyscf.dftd3 import dftd3 as _dftd3
             d3_frag = _dftd3.DFTD3Dispersion(
                 mol_frag, xc=d3.xc,
