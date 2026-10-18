@@ -146,6 +146,9 @@ def one_density_huzinaga_kernel(mf, mf_B, dm_B, conv_tol=1e-10,
 
     mol = mf.mol
     s1e = mf.get_ovlp(mol)
+    # drop near-linearly-dependent AO combinations, as PySCF's own SCF kernel does;
+    # otherwise they are not covered by the projectors and leak into the active space
+    x_orth = mf.check_linear_dependency(s1e)
 
     if dm0 is None:
         dm = mf.get_init_guess(mol, mf.init_guess, s1e=s1e, **kwargs)
@@ -163,7 +166,7 @@ def one_density_huzinaga_kernel(mf, mf_B, dm_B, conv_tol=1e-10,
 
     if mf.max_cycle <= 0:
         fock = mf.get_fock(h1e, s1e, vhf, dm)
-        mo_energy, mo_coeff = mf.eig(fock, s1e)
+        mo_energy, mo_coeff = mf.eig(fock, s1e, x=x_orth)
         mo_occ = mf.get_occ(mo_energy, mo_coeff)
         return scf_conv, e_tot, mo_energy, mo_coeff, mo_occ
 
@@ -175,9 +178,7 @@ def one_density_huzinaga_kernel(mf, mf_B, dm_B, conv_tol=1e-10,
         mf_diis.space = mf.diis_space
         mf_diis.rollback = mf.diis_space_rollback
         mf_diis.damp = mf.diis_damp
-        fock = mf.get_fock(h1e, s1e, vhf, dm)
-        _, _corth = mf.eig(fock, s1e)
-        mf_diis.Corth = _corth[0] if _corth.ndim == 3 else _corth
+        mf_diis.Corth = x_orth
     else:
         mf_diis = None
 
@@ -195,7 +196,7 @@ def one_density_huzinaga_kernel(mf, mf_B, dm_B, conv_tol=1e-10,
 
         fock = mf.get_fock(h1e, s1e, vhf, dm, cycle, mf_diis,
                            fock_last=fock_last)
-        mo_energy, mo_coeff = mf.eig(fock, s1e)
+        mo_energy, mo_coeff = mf.eig(fock, s1e, x=x_orth)
         mo_occ = mf.get_occ(mo_energy, mo_coeff)
         dm = mf.make_rdm1(mo_coeff, mo_occ)
 
@@ -234,7 +235,7 @@ def one_density_huzinaga_kernel(mf, mf_B, dm_B, conv_tol=1e-10,
     mf.cycles = cycle + 1
 
     if scf_conv and conv_check:
-        mo_energy, mo_coeff = mf.eig(fock, s1e)
+        mo_energy, mo_coeff = mf.eig(fock, s1e, x=x_orth)
         mo_occ = mf.get_occ(mo_energy, mo_coeff)
         dm, dm_last = mf.make_rdm1(mo_coeff, mo_occ), dm
         last_e = e_tot

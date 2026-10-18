@@ -67,6 +67,9 @@ def huzinaga_kernel(mf, hcore, conv_tol=1e-10, conv_tol_grad=None,
 
     mol = mf.mol
     s1e = mf.get_ovlp(mol)
+    # drop near-linearly-dependent AO combinations, as PySCF's own SCF kernel does;
+    # otherwise they are not covered by the projectors and leak into the active space
+    x_orth = mf.check_linear_dependency(s1e)
 
     if dm0 is None:
         dm = mf.get_init_guess(mol, mf.init_guess, s1e=s1e, **kwargs)
@@ -113,7 +116,7 @@ def huzinaga_kernel(mf, hcore, conv_tol=1e-10, conv_tol_grad=None,
     # Skip SCF iterations. Compute only the total energy of the initial density
     if mf.max_cycle <= 0:
         fock = mf.get_fock(h1e, s1e, vhf, dm)  # = h1e + vhf, no DIIS
-        mo_energy, mo_coeff = mf.eig(fock, s1e)
+        mo_energy, mo_coeff = mf.eig(fock, s1e, x=x_orth)
         mo_occ = mf.get_occ(mo_energy, mo_coeff)
         return scf_conv, e_tot, mo_energy, mo_coeff, mo_occ
 
@@ -126,8 +129,7 @@ def huzinaga_kernel(mf, hcore, conv_tol=1e-10, conv_tol_grad=None,
         mf_diis.rollback = mf.diis_space_rollback
         mf_diis.damp = mf.diis_damp
 
-        fock = mf.get_fock(h1e, s1e, vhf, dm)
-        _, mf_diis.Corth = mf.eig(fock, s1e)
+        mf_diis.Corth = x_orth
     else:
         mf_diis = None
 
@@ -145,7 +147,7 @@ def huzinaga_kernel(mf, hcore, conv_tol=1e-10, conv_tol_grad=None,
         last_hf_e = e_tot
 
         fock = mf.get_fock(h1e, s1e, vhf, dm, cycle, mf_diis, fock_last=fock_last)
-        mo_energy, mo_coeff = mf.eig(fock, s1e)
+        mo_energy, mo_coeff = mf.eig(fock, s1e, x=x_orth)
         mo_occ = mf.get_occ(mo_energy, mo_coeff)
         dm = mf.make_rdm1(mo_coeff, mo_occ)
         vhf = mf.get_veff(mol, dm, dm_last, vhf)
@@ -201,7 +203,7 @@ def huzinaga_kernel(mf, hcore, conv_tol=1e-10, conv_tol_grad=None,
     mf.cycles = cycle + 1
     if scf_conv and conv_check:
         # An extra diagonalization, to remove level shift
-        mo_energy, mo_coeff = mf.eig(fock, s1e)
+        mo_energy, mo_coeff = mf.eig(fock, s1e, x=x_orth)
         mo_occ = mf.get_occ(mo_energy, mo_coeff)
         dm, dm_last = mf.make_rdm1(mo_coeff, mo_occ), dm
         vhf = mf.get_veff(mol, dm, dm_last, vhf)
@@ -242,6 +244,9 @@ def uhuzinaga_kernel(mf, hcore, conv_tol=1e-10, conv_tol_grad=None,
 
     mol = mf.mol
     s1e = mf.get_ovlp(mol)
+    # drop near-linearly-dependent AO combinations, as PySCF's own SCF kernel does;
+    # otherwise they are not covered by the projectors and leak into the active space
+    x_orth = mf.check_linear_dependency(s1e)
 
     if dm0 is None:
         dm = mf.get_init_guess(mol, mf.init_guess, s1e=s1e, **kwargs)
@@ -293,7 +298,7 @@ def uhuzinaga_kernel(mf, hcore, conv_tol=1e-10, conv_tol_grad=None,
 
     if mf.max_cycle <= 0:
         fock = mf.get_fock(h1e, s1e, vhf, dm)  
-        mo_energy, mo_coeff = mf.eig(fock, s1e)
+        mo_energy, mo_coeff = mf.eig(fock, s1e, x=x_orth)
         mo_occ = mf.get_occ(mo_energy, mo_coeff)
         return scf_conv, e_tot, mo_energy, mo_coeff, mo_occ
 
@@ -305,9 +310,7 @@ def uhuzinaga_kernel(mf, hcore, conv_tol=1e-10, conv_tol_grad=None,
         mf_diis.space = mf.diis_space
         mf_diis.rollback = mf.diis_space_rollback
         mf_diis.damp = mf.diis_damp
-        fock = mf.get_fock(h1e, s1e, vhf, dm)
-        _, _corth = mf.eig(fock, s1e)
-        mf_diis.Corth = _corth[0] if _corth.ndim == 3 else _corth
+        mf_diis.Corth = x_orth
     else:
         mf_diis = None
 
@@ -324,7 +327,7 @@ def uhuzinaga_kernel(mf, hcore, conv_tol=1e-10, conv_tol_grad=None,
         last_hf_e = e_tot
 
         fock = mf.get_fock(h1e, s1e, vhf, dm, cycle, mf_diis, fock_last=fock_last)
-        mo_energy, mo_coeff = mf.eig(fock, s1e)
+        mo_energy, mo_coeff = mf.eig(fock, s1e, x=x_orth)
         mo_occ = mf.get_occ(mo_energy, mo_coeff)
         dm = mf.make_rdm1(mo_coeff, mo_occ)
         vhf = mf.get_veff(mol, dm, dm_last, vhf)
@@ -378,7 +381,7 @@ def uhuzinaga_kernel(mf, hcore, conv_tol=1e-10, conv_tol_grad=None,
     mf.cycles = cycle + 1
 
     if scf_conv and conv_check:
-        mo_energy, mo_coeff = mf.eig(fock, s1e)
+        mo_energy, mo_coeff = mf.eig(fock, s1e, x=x_orth)
         mo_occ = mf.get_occ(mo_energy, mo_coeff)
         dm, dm_last = mf.make_rdm1(mo_coeff, mo_occ), dm
         vhf = mf.get_veff(mol, dm, dm_last, vhf)
@@ -418,11 +421,14 @@ class rPRBE:
     
     def __init__(self, mf, OActiveSpace, VActiveSpace, frag_inds=None):
 
+        self.e_tot = None
+        
         # fragment mf object (to be set by kernel)
         self.mf_A = None
 
         # bath mf object
         self.mf_B = mf
+        
 
         # Occupied MOs
         if OActiveSpace is not None:
@@ -520,8 +526,8 @@ class rPRBE:
         
         return projector
     
-    def energy_elec(self, mf, dm, h1e, vhf):
-        """Calculates the electronic energy for restricted references."""
+    def mf_energy_elec(self, mf, dm, h1e, vhf):
+        """Evaluates mf.energy_elec for a given dm, h1e and vhf (overridden in uPRBE)."""
         return mf.energy_elec(dm=dm, h1e=h1e, vhf=vhf)
     
     def energy_tot(self, energy_A=None, dm_A=None):
@@ -536,7 +542,7 @@ class rPRBE:
                 
             v_a = self.mf_B.get_veff(dm=dm_A)
             hcore = self.get_hcore_embed(dm_A=dm_A)
-            energy_A, _ = self.energy_elec(mf=self.mf_B, 
+            energy_A, _ = self.mf_energy_elec(mf=self.mf_B, 
                                            dm=dm_A, vhf=v_a, h1e=hcore)
             
         energy_AB = self.mf_B.energy_tot()
@@ -647,7 +653,7 @@ class rPRBE:
         self.projector = projector
         
         # get electronic energy for MOs in active subsystem
-        self.energy_a, _ = self.energy_elec(mf=mf_B, dm=dm_A0, vhf=v_a, h1e=hcore)
+        self.energy_a, _ = self.mf_energy_elec(mf=mf_B, dm=dm_A0, vhf=v_a, h1e=hcore)
 
         # make embedding mean field object    
         if xc_embed is None:
@@ -798,37 +804,20 @@ class uPRBE(rPRBE):
             
         return projector
 
-    def energy_elec(self, mf, dm, h1e, vhf):
+    def mf_energy_elec(self, mf, dm, h1e, vhf):
         """
-        Calculates the electronic energy for unrestricted references, explicitly 
-        handling spin-dependent core Hamiltonian (h1e) arrays of shape (2, N, N).
+        Unrestricted version of mf.energy_elec. PySCF's uks.energy_elec cannot
+        take a spin-dependent h1e of shape (2, N, N), so that case is handled here.
         """
-        import numpy as np
-        
-        # 1. Calculate one-electron energy (e1) using spin-dependent h1e and dm
-        if h1e.ndim == 3:
-            e1 = np.einsum('ij,ji->', h1e[0], dm[0]).real + \
-                 np.einsum('ij,ji->', h1e[1], dm[1]).real
-        else:
-            # Fallback just in case h1e is passed as 2D
-            e1 = np.einsum('ij,ji->', h1e, dm[0] + dm[1]).real
+        if getattr(vhf, 'exc', None) is None:
+            # uhf.energy_elec already handles a spin-dependent h1e
+            return mf.energy_elec(dm=dm, h1e=h1e, vhf=vhf)
 
-        # 2. Calculate two-electron energy (e2)
-        # DFT vhf objects have ecoul and exc attributes. HF vhf objects do not.
-        if hasattr(vhf, 'ecoul') and hasattr(vhf, 'exc'):
-            ecoul = vhf.ecoul.real
-            exc = vhf.exc.real
-            e2 = ecoul + exc
-            
-            mf.scf_summary['coul'] = ecoul
-            mf.scf_summary['exc'] = exc
-        else:
-            e2 = (np.einsum('ij,ji->', dm[0], vhf[0]).real + \
-                  np.einsum('ij,ji->', dm[1], vhf[1]).real) * 0.5
-            mf.scf_summary['e2'] = e2
-            
-        mf.scf_summary['e1'] = e1
-        
+        e1 = np.einsum('sij,sji->', np.broadcast_to(h1e, dm.shape), dm).real
+        ecoul = vhf.ecoul.real
+        exc = vhf.exc.real
+        e2 = ecoul + exc
+        mf.scf_summary.update(e1=e1, e2=e2, coul=ecoul, exc=exc)
         return e1 + e2, e2
 
     def kernel(self, xc_embed=None, ecp_embed=None, pseudo_embed=None, filtermo=True, **kwargs):
@@ -856,7 +845,7 @@ class uPRBE(rPRBE):
         self.projector = projector
         
         # get electronic energy for MOs in active subsystem
-        self.energy_a, _ = self.energy_elec(mf=mf_B ,dm=dm_A0, 
+        self.energy_a, _ = self.mf_energy_elec(mf=mf_B ,dm=dm_A0, 
                                             vhf=v_a, h1e=hcore)
 
         # make embedding mean field object
@@ -878,7 +867,15 @@ class uPRBE(rPRBE):
         
         # set special embedding methods
         mf_A.get_hcore = lambda *args: hcore
-        
+        if xc_embed is not None:
+            # uks.energy_elec cannot take the spin-dependent hcore
+            def energy_elec(dm=None, h1e=None, vhf=None):
+                if dm is None: dm = mf_A.make_rdm1()
+                if h1e is None: h1e = hcore
+                if getattr(vhf, 'exc', None) is None: vhf = mf_A.get_veff(dm=dm)
+                return self.mf_energy_elec(mf_A, dm, h1e, vhf)
+            mf_A.energy_elec = energy_elec
+
         # Compute PySCF-friendly bath projectors
         P_occ_B_a = self.moC_occ_B[0] @ self.moC_occ_B[0].T
         P_occ_B_b = self.moC_occ_B[1] @ self.moC_occ_B[1].T
